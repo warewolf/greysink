@@ -105,6 +105,9 @@ sub sinkhole_handler { # {{{
       push @rrs, Net::DNS::RR->new($str);
       $result = "NOERROR";
     } # }}}
+    else { # zone exists, but not the record we want. {{{
+      $result = "NXDOMAIN";
+    } # }}}
   } # }}}
   else { # we didn't find any records, so NXDOMAIN {{{
     $result = "NXDOMAIN";
