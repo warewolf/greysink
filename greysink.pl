@@ -16,20 +16,22 @@ my $whitelist_tree = Trie::Domain::Store->new();
 
 # in Net::DNS::RR->new() (from string) format
 # The script will replace * with the name domain name queried.
-#
-my $apt_records = {    # {{{
+
+my $sinkhole_records = {    # {{{
   A  => '* 86400 IN A 10.1.2.3',
-  NS => '* IN NS xabean.net',
-  SOA => '* IN SOA ns.apt.blackhole.example.com. cert.example.com.  ( 1997022700 28800 14400 3600000 86400)',
+  NS => '* IN NS ns.sinkhole.example.com',
+  SOA => '* IN SOA ns.sinkhole.example.com. cert.example.com.  ( 42 28800 14400 3600000 86400)',
 };    # }}}
 
-# whitelist
+# whitelist (don't add any records, we will recurse out to the internet for them)
 $whitelist_tree->add('richardharman.com');
 $whitelist_tree->add('*.richardharman.com');
 
-# sinkhole
-$sinkhole_tree->add('*.dyn.com')->{records} = $apt_records;
-$sinkhole_tree->add('dyn.com')->{records}   = $apt_records;
+# sinkhole (pass a hashref of RR => 'rr string') under the records key
+$sinkhole_tree->add('sinkhole.example.com')->{records} = $sinkhole_records;
+$sinkhole_tree->add('*.sinkhole.example.com')->{records} = $sinkhole_records;
+$sinkhole_tree->add('*.dyn.com')->{records} = $sinkhole_records;
+$sinkhole_tree->add('dyn.com')->{records}   = $sinkhole_records;
 
 my $recursive = Net::DNS::Resolver->new( # {{{
   recursive => 1,
@@ -46,15 +48,15 @@ my $whitelist = Net::DNS::Resolver::Programmable->new( # {{{
 
 # resolvers - order matters here.
 # first one to respond is the response that gets sent to the client.
-#my @resolvers = ($whitelist,$sinkhole,$recursive);
-my @resolvers = ( $whitelist, $sinkhole, );
+my @resolvers = ($whitelist,$sinkhole,$recursive);
 
+# our nameserver object.  Query me w/ 'dig -p 5252 -t a mtfnpy.dyn.com @localhost'
 my $ns = Net::DNS::Nameserver->new( # {{{
   LocalPort    => 5252,
   LocalAddr    => [ '127.0.0.1', ],
   ReplyHandler => \&reply_handler,
   Verbose      => $verbose,
-) || die "couldn't create nameserver object\n"; # }}}
+) || die "couldn't create nameserver object ($!)"; # }}}
 
 sub reply_handler { # {{{
   my ( $qname, $qclass, $qtype, $peerhost, $query, $conn ) = @_;
@@ -68,13 +70,13 @@ sub reply_handler { # {{{
 
   # response might be undef if nothing responded
   if ($valid_answer) { # response was valid {{{
+    # XXX FIXME RGH: Net::DNS::Resolver::Programmable doesn't support sending additional or authorative records :(
     $rcode = $valid_answer->header->rcode;
     @ans   = $valid_answer->answer;
     @add   = $valid_answer->additional;
     @auth  = $valid_answer->authority;
   } # }}}
   else { # none of our resolvers found anything {{{
-
     $rcode = "SERVFAIL";
   } # }}}
 
@@ -99,7 +101,7 @@ sub sinkhole_handler { # {{{
       my $str = $record->{records}->{$rr_type};
 
       # make our sinkholed response look like the question
-      $str =~ s/\*/$domain/;
+      $str =~ s/\*/$domain/g;
       push @rrs, Net::DNS::RR->new($str);
       $result = "NOERROR";
     } # }}}
