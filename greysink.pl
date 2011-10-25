@@ -12,7 +12,7 @@ use List::Util qw(first);
 # shortcut for reversing a string
 sub rev ($) { scalar reverse $_[0]; }
 
-my $verbose = 0;
+my $verbose = 1;
 
 my $sinkhole_tree  = Tree::Trie->new();
 my $whitelist_tree = Tree::Trie->new();
@@ -28,19 +28,16 @@ my $sinkhole_records = { # {{{
   },
 }; # }}}
 
-
-
 # whitelist (don't add any records, we will recurse out to the internet for them)
-$whitelist_tree->add(rev 'www.richardharman.com');
-
-$sinkhole_tree->add_data(rev 'richardharman.com',  $sinkhole_records  );
-$sinkhole_tree->add_data(rev '*.richardharman.com', $sinkhole_records  );
+$whitelist_tree->add( rev('www.richardharman.com') );
 
 # sinkhole (pass a hashref of RR => 'rr string') under the records key
-$sinkhole_tree->add_data(rev 'sinkhole.example.com',  $sinkhole_records );
-$sinkhole_tree->add_data(rev '*.sinkhole.example.com', $sinkhole_records );
-$sinkhole_tree->add_data(rev '*.dyn.com', $sinkhole_records  );
-$sinkhole_tree->add_data(rev 'dyn.com',  $sinkhole_records  );
+$sinkhole_tree->add_data( rev('richardharman.com'),  $sinkhole_records  );
+$sinkhole_tree->add_data( rev('*.richardharman.com'), $sinkhole_records  );
+$sinkhole_tree->add_data( rev('sinkhole.example.com'),  $sinkhole_records );
+$sinkhole_tree->add_data( rev('*.sinkhole.example.com'), $sinkhole_records );
+$sinkhole_tree->add_data( rev('*.dyn.com'), $sinkhole_records  );
+$sinkhole_tree->add_data( rev('dyn.com'),  $sinkhole_records  );
 
 
 my $recursive = Net::DNS::Resolver->new( # {{{
