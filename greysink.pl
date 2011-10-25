@@ -6,32 +6,42 @@ use warnings;
 use Net::DNS::Nameserver;
 use Net::DNS::Resolver::Programmable;
 use Net::DNS::Resolver;
-use Trie::Domain::Store; # get from https://github.com/warewolf/Trie-Domain-Store
+use Tree::Trie;
 use List::Util qw(first);
+
+# shortcut for reversing a string
+sub rev ($) { return scalar reverse split //,$_[0]; }
 
 my $verbose = 0;
 
-my $sinkhole_tree  = Trie::Domain::Store->new();
-my $whitelist_tree = Trie::Domain::Store->new();
+my $sinkhole_tree  = Tree::Trie->new();
+my $whitelist_tree = Tree::Trie->new();
 
 # in Net::DNS::RR->new() (from string) format
 # The script will replace * with the name domain name queried.
 
-my $sinkhole_records = {    # {{{
-  A  => '* 86400 IN A 10.1.2.3',
-  NS => '* IN NS ns.sinkhole.example.com',
-  SOA => '* IN SOA ns.sinkhole.example.com. cert.example.com.  ( 42 28800 14400 3600000 86400)',
-};    # }}}
+my $sinkhole_records = { # {{{
+  records => {
+	A  => '* 86400 IN A 10.1.2.3',
+	NS => '* IN NS ns.sinkhole.example.com',
+	SOA => '* IN SOA ns.sinkhole.example.com. cert.example.com.  ( 42 28800 14400 3600000 86400)',
+  },
+}; # }}}
+
+
 
 # whitelist (don't add any records, we will recurse out to the internet for them)
-$whitelist_tree->add('richardharman.com');
-$whitelist_tree->add('*.richardharman.com');
+$whitelist_tree->add(rev 'www.richardharman.com');
+
+$sinkhole_tree->add_data(rev 'richardharman.com',  $sinkhole_records  );
+$sinkhole_tree->add_data(rev '*.richardharman.com', $sinkhole_records  );
 
 # sinkhole (pass a hashref of RR => 'rr string') under the records key
-$sinkhole_tree->add('sinkhole.example.com')->{records} = $sinkhole_records;
-$sinkhole_tree->add('*.sinkhole.example.com')->{records} = $sinkhole_records;
-$sinkhole_tree->add('*.dyn.com')->{records} = $sinkhole_records;
-$sinkhole_tree->add('dyn.com')->{records}   = $sinkhole_records;
+$sinkhole_tree->add_data(rev 'sinkhole.example.com',  $sinkhole_records );
+$sinkhole_tree->add_data(rev '*.sinkhole.example.com', $sinkhole_records );
+$sinkhole_tree->add_data(rev '*.dyn.com', $sinkhole_records  );
+$sinkhole_tree->add_data(rev 'dyn.com',  $sinkhole_records  );
+
 
 my $recursive = Net::DNS::Resolver->new( # {{{
   recursive => 1,
@@ -91,10 +101,10 @@ sub sinkhole_handler { # {{{
   my ( $domain, $rr_type, $class ) = @_;
   my ( $result, $aa, @rrs );
 
-  my $zone = first { $sinkhole_tree->seek( lc($_) ) } wildcardsearch($domain);
+  my $zone = first { $sinkhole_tree->lookup( rev lc($_) ) } wildcardsearch($domain);
   if ($zone) { # we found a record in our tree # {{{
     # grab the hashref that has our RR types & records
-    my $record = $sinkhole_tree->seek( lc($zone) );
+    my $record = $sinkhole_tree->lookup_data( rev lc($zone) );
 
     # check if the RR type we want exists
     if ( exists( $$record{records}{$rr_type} ) ) { # RR exists, now we get to answer {{{
@@ -122,7 +132,7 @@ sub whitelist_handler { # {{{
   my ( $domain, $rr_type, $class ) = @_;
   my ( $result, $aa, @rrs );
 
-  my $zone = first { $whitelist_tree->seek( lc($_) ) } wildcardsearch($domain);
+  my $zone = first { $whitelist_tree->lookup( rev lc($_) ) } wildcardsearch($domain);
   # $zone might be undef if no responses
   if ($zone) { # response was found {{{
     my $answer = $recursive->send( $domain, $rr_type, $class );
