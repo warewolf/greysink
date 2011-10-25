@@ -10,7 +10,7 @@ use Tree::Trie;
 use List::Util qw(first);
 
 # shortcut for reversing a string
-sub rev ($) { return scalar reverse split //,$_[0]; }
+sub rev ($) { scalar reverse $_[0]; }
 
 my $verbose = 0;
 
