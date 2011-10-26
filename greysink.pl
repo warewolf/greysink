@@ -92,9 +92,10 @@ sub reply_handler { # {{{
   my ( $qname, $qclass, $qtype, $peerhost, $query, $conn ) = @_;
   my ( $rcode, @ans, @auth, @add, $aa );
 
-  # send requet to various resolvers
+  # send requet to various resolvers.
+  # this will do the lookup, test the response, and if it is == IGNORE, set the response to undef.
   my $response;
-  first { $response = $_->send( $qname, $qtype, $qclass ) and $response->header->rcode ne "IGNORE" } @resolvers;
+  first { $response = $_->send( $qname, $qtype, $qclass ); $response->header->rcode ne "IGNORE" or $response = undef } @resolvers;
 
   # $response might be undef if nothing responded
   if ($response) { # response was valid {{{
