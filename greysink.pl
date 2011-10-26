@@ -94,6 +94,7 @@ sub reply_handler { # {{{
 
   # send requet to various resolvers.
   # this will do the lookup, test the response, and if it is == IGNORE, set the response to undef.
+  # XXX FIXME: make this into a subroutine, this is nutty.
   my $response;
   first { $response = $_->send( $qname, $qtype, $qclass ); $response->header->rcode ne "IGNORE" or $response = undef } @resolvers;
 
