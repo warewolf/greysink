@@ -87,16 +87,26 @@ my $ns = Net::DNS::Nameserver->new( # {{{
   Verbose      => $verbose,
 ) || die "couldn't create nameserver object ($!)"; # }}}
 
+# find and return the first resolver's answer that has a RCODE not equal to IGNORE
+sub first_response { # {{{
+  my ($qname,$qtype,$qclass,$resolvers) = @_;
+
+  foreach my $resolver (@$resolvers) {
+    my $answer = $resolver->send( $qname, $qtype, $qclass );
+    return $answer if ($answer->header->rcode ne "IGNORE");
+  }
+
+  # fall through default
+  return undef;
+} # }}}
+
 # our handler for all incoming DNS requests.  Here's the brains.
 sub reply_handler { # {{{
   my ( $qname, $qclass, $qtype, $peerhost, $query, $conn ) = @_;
   my ( $rcode, @ans, @auth, @add, $aa );
 
   # send requet to various resolvers.
-  # this will do the lookup, test the response, and if it is == IGNORE, set the response to undef.
-  # XXX FIXME: make this into a subroutine, this is nutty.
-  my $response;
-  first { $response = $_->send( $qname, $qtype, $qclass ); $response->header->rcode ne "IGNORE" or $response = undef } @resolvers;
+  my $response = first_response($qname, $qtype, $qclass, \@resolvers);
 
   # $response might be undef if nothing responded
   if ($response) { # response was valid {{{
