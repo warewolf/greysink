@@ -93,12 +93,8 @@ sub reply_handler { # {{{
   my ( $rcode, @ans, @auth, @add, $aa );
 
   # send requet to various resolvers
-  # XXX FIXME: this will always do a lookup against each resolver in @resolvers
-  # no matter if the first one returns a successful lookup or not.  This might get noisy.
-  my (@responses) = map { $_->send( $qname, $qtype, $qclass ) } @resolvers;
-
-  # we only want the first valid response - we use a special sauce dns RCODE to skip resolvers
-  my $response = first { $_->header->rcode ne "IGNORE" } @responses;
+  my $response;
+  first { $response = $_->send( $qname, $qtype, $qclass ) and $response->header->rcode ne "IGNORE" } @resolvers;
 
   # $response might be undef if nothing responded
   if ($response) { # response was valid {{{
