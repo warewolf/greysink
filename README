@@ -1,6 +1,3 @@
 greysink is a grey/black/whitelisting DNS sinkhole.
 
 It blossomed out of the need to sinkhole malicious domain names.
-
-It requires my Trie::Domain::Store module (until I shoehorn it to use a Trie module on CPAN), which can be found at https://github.com/warewolf/Trie-Domain-Store
-

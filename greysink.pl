@@ -14,6 +14,67 @@ use List::Util qw(first);
 $Net::DNS::rcodesbyname{IGNORE} = 11;
 %Net::DNS::rcodesbyval = reverse %Net::DNS::rcodesbyname;
 
+# lifted from Net::DNS::Resolver::Programmable, and hacked up to support returning records in the additional/authority sections
+package Net::DNS::Resolver::Programmable; # {{{
+{
+  no warnings 'redefine';
+  sub send { # {{{
+	  my $self = shift;
+
+	  my $query_packet = $self->make_query_packet(@_);
+	  my $question = ($query_packet->question)[0];
+	  my $domain   = lc($question->qname);
+	  my $rr_type  = $question->qtype;
+	  my $class    = $question->qclass;
+
+	  $self->_reset_errorstring;
+
+	  my ($rcode, $answer, $authority, $additional, $headermask );
+
+	  if (defined(my $resolver_code = $self->{resolver_code})) { # {{{
+		  ($rcode, $answer, $authority, $additional, $headermask ) = $resolver_code->($domain, $rr_type, $class);
+	  } # }}}
+
+	  if (not defined($rcode) or defined($Net::DNS::rcodesbyname{$rcode})) { # {{{
+		  # Valid RCODE, return a packet:
+		  $rcode = 'NOERROR' if not defined($rcode);
+
+		  if (defined(my $records = $self->{records})) { # {{{
+			  if (ref(my $rrs_for_domain = $records->{$domain}) eq 'ARRAY') {
+				  foreach my $rr (@$rrs_for_domain) {
+					  push(@$answer, $rr)
+						  if  $rr->name  eq $domain
+						  and $rr->type  eq $rr_type
+						  and $rr->class eq $class;
+				  }
+			  }
+		  } # }}}
+
+		  my $reply = Net::DNS::Packet->new($domain, $rr_type, $class);
+		  $reply->header->qr(1); # query response
+		  $reply->header->rcode($rcode);
+		  $reply->push(question => $query_packet->question); # query section returned to caller (?)
+		  # fill in the response body
+		  $reply->push(answer => @$answer) if $answer;
+		  $reply->push(authority => @$authority) if $authority;
+		  $reply->push(additional => @$additional) if $additional;
+
+		  $reply->header->aa(1) if $headermask->{'aa'};
+		  $reply->header->ra(1) if $headermask->{'ra'};
+		  $reply->header->ad(1) if $headermask->{'ad'};
+
+		  return $reply;
+	  } # }}}
+	  else { # {{{
+		  # Invalid RCODE, signal error condition by not returning a packet:
+		  $self->errorstring($rcode);
+		  return undef;
+	  } # }}}
+  } # }}}
+} # }}}
+
+package main;
+
 # shortcut for reversing a string
 sub rev ($) { scalar reverse $_[0]; }
 
@@ -122,7 +183,7 @@ sub reply_handler { # {{{
     $rcode = "NXDOMAIN";
   } # }}}
 
-  # XXX FIXME We need to sanatise responses!
+  # XXX FIXME We need to sanatize responses!
   # The glue records (@add) might override what we "know" to be the "truth"
   # (e.g. what we have blacklisted, and how to "get" there)
   return ( $rcode, \@ans, \@auth, \@add, $aa );
@@ -131,7 +192,7 @@ sub reply_handler { # {{{
 
 sub sinkhole_handler { # {{{
   my ( $qname, $qtype, $qclass ) = @_;
-  my ( $rcode, $aa, @rrs );
+  my ( $rcode, @answer, @authority, @additional, $headermask );
 
   my $zone = first { $sinkhole_tree->lookup( rev lc($_) ) } wildcardsearch($qname);
   if ($zone) { # we found a record in our tree # {{{
@@ -140,11 +201,31 @@ sub sinkhole_handler { # {{{
 
     # check if the RR type we want exists
     if ( exists( $$record{records}{$qtype} ) ) { # RR exists, now we get to answer {{{
-      my $str = $record->{records}->{$qtype};
-
       # make our sinkholed response look like the question
-      $str =~ s/\*/$qname/g;
-      push @rrs, Net::DNS::RR->new($str);
+      my $answer_rr = $record->{records}->{$qtype};
+      $answer_rr =~ s/\*/$qname/g;
+      push @answer, Net::DNS::RR->new($answer_rr);
+
+      # make a NS record for the authority section
+      my $ns_rr = $record->{records}->{NS};
+      $ns_rr =~ s/\*/$zone/g;
+      # hide that we might be wildcarding stuff
+      $ns_rr =~ s/^\*\.//g;
+      push @authority,Net::DNS::RR->new($ns_rr);
+
+      # make an A record of the NS in the authority section for the additional section
+      my $ns_name = $authority[0]->nsdname;
+
+      # figure out what sinkholed "zone" the NS is in
+      # XXX FIXME: this requires that the nameservers of sinkholed domains be in sinkholed domains!
+      my $ns_zone = first { $sinkhole_tree->lookup( rev lc($_) ) } wildcardsearch($ns_name);
+      # grab the records hashref for that zone
+      my $ns_zone_records = $sinkhole_tree->lookup_data( rev lc($ns_zone) );
+      # grab the A record in that hashref
+      my $ns_a = $ns_zone_records->{records}->{A};
+      # change the * to be the name of our nameserver
+      $ns_a =~ s/\*/$ns_name/;
+      push @additional,Net::DNS::RR->new($ns_a);
       $rcode = "NOERROR";
     } # }}}
     else { # zone exists, but not the record we want. {{{
@@ -157,28 +238,31 @@ sub sinkhole_handler { # {{{
 
   # XXX FIXME
   # it would be nice if we could respond with additional RRs (for NS lookups)
-  return ( $rcode, $aa, @rrs );
+  return ( $rcode, \@answer, \@authority, \@additional, $headermask );
 } # }}}
 
 sub whitelist_handler { # {{{
   my ( $qname, $qtype, $qclass ) = @_;
-  my ( $rcode, $aa, @rrs );
+  my ( $rcode, @answer, @authority, @additional, $headermask );
 
   my $zone = first { $whitelist_tree->lookup( rev lc($_) ) } wildcardsearch($qname);
   # $zone might be undef if no responses
   if ($zone) { # response was found {{{
     my $answer = $recursive->send( $qname, $qtype, $qclass );
 
-    # set RR Code
-    $rcode = $answer->header->rcode;
-    @rrs   = $answer->answer;
-    $rcode = "NOERROR";
+    # clone the response
+    $rcode        = $answer->header->rcode;
+    @answer       = $answer->answer;
+    @additional   = $answer->additional;
+    @authority    = $answer->authority;
+    $headermask->{'aa'} = 1 if $answer->header->aa;
   } # }}}
   else { # no zone found in our trie, return custom rcode IGNORE
     $rcode = "IGNORE";
   } # }}}
 
-  return ( $rcode, $aa, @rrs );
+  # XXX FIXME: We need to sanatize responses!
+  return ( $rcode, \@answer, \@authority, \@additional, $headermask );
 } # }}}
 
 # wildcard-ify a request to see if something shorter for a wildcard exists.
