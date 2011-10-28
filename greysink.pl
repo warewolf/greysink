@@ -101,7 +101,7 @@ my $authorative_ns_records = { # {{{
   records => {
     A => '* 86400 IN A 192.168.100.100',
     NS => '* 86400 IN NS ns.sinkhole.example.com',
-	SOA => '* 86400 IN SOA ns.sinkhole.example.com. cert.example.com.  ( 42 28800 14400 3600000 86400)',
+    SOA => '* 86400 IN SOA ns.sinkhole.example.com. cert.example.com.  ( 42 28800 14400 3600000 86400)',
   },
 }; # }}}
 
@@ -169,7 +169,6 @@ sub reply_handler { # {{{
 
   # $response might be undef if nothing responded
   if ($response) { # response was valid {{{
-    # XXX FIXME RGH: Net::DNS::Resolver::Programmable doesn't support sending additional or authorative records :(
     $rcode = $response->header->rcode;
     @ans   = $response->answer;
     @add   = $response->additional;
@@ -220,18 +219,24 @@ sub censor_authority { # {{{
         # We should fake out that we're the only authorative NS for the zone,
         # so that other (potentially sinkholed) zones hosted by this nameserver
         # are inaccessible by clients unless they go through us for sinkhole checking.
+        print STDERR "Warning: zone $zone is whitelisted under $whitelisted_zone, but nameserver $nameserver is not.\n"
       } else {
         # ... and NS is whitelisted.
         # We're good.
+        print STDERR "Info: zone $zone and ns $nameserver are both whitelisted.\n";
       }
     } else {
       # zone is not whitelisted
       if ( ! $whitelisted_ns ) {
         # ... and nameserver is not whitelisted
         # we should check sinkholes to see if the NS is sinkholed.
+        #print STDERR "Proceed carefully: zone $zone is not whitelisted, neither is its authorative NS $nameserver.  Sinkholes should be checked.\n";
+        # fall through to sinkhole ns/zone checking
       } else {
         # ... but nameserver is whitelisted.
         # we should check sinkholes to see if the zone is sinkholed.
+        #print STDERR "Warning: zone $zone is not whitelisted, but authorative NS $nameserver is.\n";
+        # fall through to sinkhole ns/zone checking
       }
     }
 
@@ -241,7 +246,7 @@ sub censor_authority { # {{{
       if ( ! $sinkholed_zone) { # {{{
 	    # nameserver is sinkholed, but zoneis NOT sinkholed.
 	    # This is a new zone hosted by a sinkholed NS we don't know about.
-	    print STDERR "Warning: NS $nameserver in sinkholed zone $sinkholed_ns authorative for non-sinkholed (new?) zone $zone\n";
+	    print STDERR "Critical: NS $nameserver in sinkholed zone $sinkholed_ns authorative for non-sinkholed (new?) zone $zone\n";
       } # }}}
       else { # {{{
         # nameserver is sinkholed, and zone is sinkholed.
@@ -253,11 +258,11 @@ sub censor_authority { # {{{
       if ( $sinkholed_zone ) { # {{{
         # nameserver is NOT sinkholed, but zone is sinkholed.
         # This is a new nameserver that we don't know about, for a sinkholed zone.
-	    print STDERR "Warning: NS $nameserver is authorative for sinkholed zone $zone, but $nameserver isn't sinkholed.\n";
+	    print STDERR "Critical: NS $nameserver is authorative for sinkholed zone $zone, but $nameserver isn't sinkholed.\n";
       } # }}}
       else { # {{{
         # nameserver is NOT sinkholed, and zone is NOT sinkholed.  We're good.
-	    print STDERR "Info: NS $nameserver not sinkholed hosting non-sinkholed zone $zone. Why are we here?\n";
+	    #print STDERR "Info: NS $nameserver not sinkholed hosting non-sinkholed zone $zone. Why are we here?\n";
       } # }}}
     } # }}}
   } # }}}
@@ -293,7 +298,7 @@ sub sinkhole_handler { # {{{
       my $ns_name = $authority[0]->nsdname;
 
       # figure out what sinkholed "zone" the NS is in
-      # XXX FIXME: this requires that the nameservers of sinkholed domains be in sinkholed domains!
+      # XXX: this requires that the nameservers of sinkholed domains be in sinkholed domains!
       my $ns_zone = first { $sinkhole_tree->lookup( rev lc($_) ) } wildcardsearch($ns_name);
       # grab the records hashref for that zone
       my $ns_zone_records = $sinkhole_tree->lookup_data( rev lc($ns_zone) );
