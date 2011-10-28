@@ -107,18 +107,16 @@ my $authorative_ns_records = { # {{{
 
 # whitelist: don't add any records, only add domains - we will recurse out to the internet for the records {{{
 $whitelist_tree->add( rev('www.richardharman.com') );
+$whitelist_tree->add( rev('frost.ath.cx') );
 # }}}
 
 # sinkhole: pass a hashref of { records => { RR => 'rr string' } } # {{{
 # XXX Note! x.com does not match *.x.com.  Wildcards are EXPLICIT, not implied.
-$sinkhole_tree->add_data( rev('richardharman.com'),  $sinkhole_records  );
-$sinkhole_tree->add_data( rev('*.richardharman.com'), $sinkhole_records  );
-$sinkhole_tree->add_data( rev('dyn.com'),  $sinkhole_records  );
-$sinkhole_tree->add_data( rev('*.dyn.com'), $sinkhole_records  );
+$sinkhole_tree->add_data( rev('dyndns.org'), $sinkhole_records  );
+$sinkhole_tree->add_data( rev('*.dyndns.org'), $sinkhole_records  );
 # }}}
 
 # authorative NS server records, for zones we're sinkholing.
-# XXX FIXME: this will be more effective/useful when ::Resolver::Programmable supports additional/authority RRs.
 $sinkhole_tree->add_data( rev('ns.sinkhole.example.com'),  $authorative_ns_records  );
 
 my $recursive = Net::DNS::Resolver->new( # {{{
@@ -183,11 +181,89 @@ sub reply_handler { # {{{
     $rcode = "NXDOMAIN";
   } # }}}
 
-  # XXX FIXME We need to sanatize responses!
-  # The glue records (@add) might override what we "know" to be the "truth"
-  # (e.g. what we have blacklisted, and how to "get" there)
-  return ( $rcode, \@ans, \@auth, \@add, $aa );
+  # XXX FIXME RGH: Need a way to provide/override A record responses for unknown/new zones hosted by nameservers under sinkholed zones
+  # XXX FIXME RGH: Also! there should be intelligence on $aa (aka $headermask).
+  my ($authority,$additional) = censor_authority(\@auth,\@add);
+  return ( $rcode, \@ans, $authority,$additional , $aa );
 
+} # }}}
+
+# censor authority & additional records
+sub censor_authority { # {{{
+  my ($orig_authority,$orig_additional) = @_;
+  my ($authority,$additional);
+
+  foreach my $record (@$orig_authority) { # {{{
+    my @record_fields;
+
+    # There's two types of records we get back in AUTHORITY sections.
+    # NS and SOA.  But we treat them mostly the same.
+    if ($record->type() eq 'NS')
+    { @record_fields = qw(name nsdname); }
+
+    elsif ($record->type() eq 'SOA')
+    { @record_fields = qw(name mname); }
+
+	my ($zone,$nameserver) = map { $record->$_() } @record_fields;
+
+	# either the zone in $zone, or the nameserver in $nameserver could be something we're "authoritive" for.
+	my $sinkholed_ns = first { $sinkhole_tree->lookup( rev lc($_) ) } wildcardsearch($nameserver);
+	my $sinkholed_zone = first { $sinkhole_tree->lookup( rev lc($_) ) } wildcardsearch($zone);
+
+	my $whitelisted_ns = first { $whitelist_tree->lookup( rev lc($_) ) } wildcardsearch($nameserver);
+	my $whitelisted_zone = first { $whitelist_tree->lookup( rev lc($_) ) } wildcardsearch($zone);
+
+    if ($whitelisted_zone) {
+      # zone is whitelisted
+      if (! $whitelisted_ns) {
+        # ... but nameserver is not.
+        # We should fake out that we're the only authorative NS for the zone,
+        # so that other (potentially sinkholed) zones hosted by this nameserver
+        # are inaccessible by clients unless they go through us for sinkhole checking.
+      } else {
+        # ... and NS is whitelisted.
+        # We're good.
+      }
+    } else {
+      # zone is not whitelisted
+      if ( ! $whitelisted_ns ) {
+        # ... and nameserver is not whitelisted
+        # we should check sinkholes to see if the NS is sinkholed.
+      } else {
+        # ... but nameserver is whitelisted.
+        # we should check sinkholes to see if the zone is sinkholed.
+      }
+    }
+
+    # if whitelisting had ANYTHING to do with the zone or nameserver, we should not have reached here.
+
+	if ( $sinkholed_ns ) { # {{{
+      if ( ! $sinkholed_zone) { # {{{
+	    # nameserver is sinkholed, but zoneis NOT sinkholed.
+	    # This is a new zone hosted by a sinkholed NS we don't know about.
+	    print STDERR "Warning: NS $nameserver in sinkholed zone $sinkholed_ns authorative for non-sinkholed (new?) zone $zone\n";
+      } # }}}
+      else { # {{{
+        # nameserver is sinkholed, and zone is sinkholed.
+        # We're good.
+	    print STDERR "Info: NS $nameserver is is in sinkholed zone $sinkholed_ns and authorative for sinkholed zone $zone\n";
+      } # }}}
+	} # }}}
+    else { # {{{
+      if ( $sinkholed_zone ) { # {{{
+        # nameserver is NOT sinkholed, but zone is sinkholed.
+        # This is a new nameserver that we don't know about, for a sinkholed zone.
+	    print STDERR "Warning: NS $nameserver is authorative for sinkholed zone $zone, but $nameserver isn't sinkholed.\n";
+      } # }}}
+      else { # {{{
+        # nameserver is NOT sinkholed, and zone is NOT sinkholed.  We're good.
+	    print STDERR "Info: NS $nameserver not sinkholed hosting non-sinkholed zone $zone. Why are we here?\n";
+      } # }}}
+    } # }}}
+  } # }}}
+
+  # fall through return NO authority or additional records.
+  return undef,undef;
 } # }}}
 
 sub sinkhole_handler { # {{{
@@ -236,8 +312,6 @@ sub sinkhole_handler { # {{{
     $rcode = "IGNORE";
   } # }}}
 
-  # XXX FIXME
-  # it would be nice if we could respond with additional RRs (for NS lookups)
   return ( $rcode, \@answer, \@authority, \@additional, $headermask );
 } # }}}
 
@@ -257,11 +331,10 @@ sub whitelist_handler { # {{{
     @authority    = $answer->authority;
     $headermask->{'aa'} = 1 if $answer->header->aa;
   } # }}}
-  else { # no zone found in our trie, return custom rcode IGNORE
+  else { # no zone found in our trie, return custom rcode IGNORE {{{
     $rcode = "IGNORE";
   } # }}}
 
-  # XXX FIXME: We need to sanatize responses!
   return ( $rcode, \@answer, \@authority, \@additional, $headermask );
 } # }}}
 
