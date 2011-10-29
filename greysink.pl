@@ -86,8 +86,8 @@ my $verbose = 1;
 my $auto_sinkhole = 1;
 my $auto_whitelist = 1;
 
-my $sinkhole_tree  = Tree::Trie->new();
-my $whitelist_tree = Tree::Trie->new();
+my $sinkhole_tree  = Tree::Trie->new({deepsearch=> "exact"});
+my $whitelist_tree = Tree::Trie->new({deepsearch=> "exact"});
 
 # RR record values are in Net::DNS::RR->new() (from string) format
 # The script will replace * with the domain name queried.
@@ -111,8 +111,15 @@ my $authorative_ns_records = { # {{{
 }; # }}}
 
 # whitelist: don't add any records, only add domains - we will recurse out to the internet for the records {{{
-$whitelist_tree->add( rev('www.richardharman.com') );
-$whitelist_tree->add( rev('frost.ath.cx') );
+#
+# XXX FIXME: if we whitelist *one record* of a zone (e.g. www.richardharman.com, and not *.www.richardharman.com),
+# and someone does a lookup for blar.www.richardharman.com,
+# the real authorative NS gets leaked back to the client when in recusive mode.
+#
+# XXX FIXME: There's also a bug of the authorative NS getting leaked back
+# when we whitelist third.second.tld, and there's an authorative NS for second.tld.
+$whitelist_tree->add( rev('402ra.blogdns.com') );
+#$whitelist_tree->add( rev('ath.cx') );
 # }}}
 
 # sinkhole: pass a hashref of { records => { RR => 'rr string' } } # {{{
@@ -143,6 +150,7 @@ my $whitelist = Net::DNS::Resolver::Programmable->new( # {{{
 #
 # XXX remove $recursive here if you don't want this nameserver to be an open dns server.
 my @resolvers = ($whitelist,$sinkhole,$recursive);
+#my @resolvers = ($whitelist,$sinkhole,);
 
 # our nameserver object.  Query me w/ 'dig -p 5252 -t a mtfnpy.dyn.com @localhost'
 my $ns = Net::DNS::Nameserver->new( # {{{
@@ -171,7 +179,7 @@ sub reply_handler { # {{{
   my ( $rcode, @ans, @auth, @add, $aa );
 
   # send requet to various resolvers.
-  my $response = first_response($qname, $qtype, $qclass, \@resolvers);
+  CENSOR_REDO: my $response = first_response($qname, $qtype, $qclass, \@resolvers);
 
   # $response might be undef if nothing responded
   if ($response) { # response was valid {{{
@@ -186,19 +194,23 @@ sub reply_handler { # {{{
     $rcode = "NXDOMAIN";
   } # }}}
 
-  # XXX FIXME RGH: Need a way to provide/override A record responses for unknown/new zones hosted by nameservers under sinkholed zones
-  # XXX FIXME RGH: Also! there should be intelligence on $aa (aka $headermask).
-  my ($authority,$additional) = censor_authority(\@auth,\@add);
-  return ( $rcode, \@ans, $authority,$additional , $aa );
+  # if our censorship check returns true, *and* we're learning,
+  # we need to redo the lookup because it was wrong, and needs to be corrected.
+  goto CENSOR_REDO if ( ($auto_sinkhole || $auto_whitelist) && censor_authority(\@auth,\@add) );
+  # XXX FIXME RGH: We need to censor auth/add for whitelisted individual records,
+  # so the real auth/add records don't get leaked back to the client.
+  return ( $rcode, \@ans, \@auth,\@add , $aa );
 
 } # }}}
 
 # censor authority & additional records
 sub censor_authority { # {{{
-  my ($orig_authority,$orig_additional) = @_;
-  my ($authority,$additional);
+  my ($authority,$additional) = @_;
 
-  RECORD: foreach my $record (@$orig_authority) { # {{{
+  # flag if we censored a record, and the lookup in reply_handler needs to be repeated
+  my $censored = 0;
+
+  foreach my $record (@$authority) { # {{{
     my @record_fields;
 
     # There's two types of records we get back in AUTHORITY sections.
@@ -216,7 +228,7 @@ sub censor_authority { # {{{
     my $sinkholed_zone = lc( first { $sinkhole_tree->lookup( rev lc($_) ) } wildcardsearch($zone) );
 
     my $whitelisted_ns = lc( first { $whitelist_tree->lookup( rev lc($_) ) } wildcardsearch($nameserver) );
-    my $whitelisted_zone = lc( first { $whitelist_tree->lookup( rev lc($_) ) } wildcardsearch($zone) );
+    my $whitelisted_zone = lc( first { $whitelist_tree->lookup( rev(lc($_)) ) } wildcardsearch($zone) );
 
     if ($whitelisted_zone) { # {{{
       # zone is whitelisted
@@ -238,14 +250,18 @@ sub censor_authority { # {{{
       if ( ! $whitelisted_ns ) { # {{{
         # ... and nameserver is not whitelisted
         # we should check sinkholes to see if the NS is sinkholed.
-        #print STDERR "Proceed carefully: zone $zone is not whitelisted, neither is its authorative NS $nameserver.  Sinkholes should be checked.\n";
+        print STDERR "Proceed carefully: zone $zone is not whitelisted, neither is its authorative NS $nameserver.  Sinkholes should be checked.\n";
         # fall through to sinkhole ns/zone checking
       } # }}}
       else { # {{{
         # ... but nameserver is whitelisted.
         # we should check sinkholes to see if the zone is sinkholed.
         print STDERR "Warning: zone $zone is not whitelisted, but authorative NS $nameserver is whitelisted under $whitelisted_ns.\n";
-        # XXX FIXME RGH: auto-whitelist?
+        if ($auto_whitelist) { # {{{
+		  clone_record($whitelist_tree,$zone,$whitelisted_ns);
+		  clone_record($whitelist_tree,"*.".$zone,$whitelisted_ns);
+          return 1;
+        } # }}}
         # fall through to sinkhole ns/zone checking
       } # }}}
     } # }}}
@@ -258,15 +274,15 @@ sub censor_authority { # {{{
         # This is a new zone hosted by a sinkholed NS we don't know about.
         print STDERR "Critical: NS $nameserver in sinkholed zone $sinkholed_ns authorative for non-sinkholed (new?) zone $zone.\n";
         if ($auto_sinkhole) { # {{{
-          clone_record($sinkhole_trie,$zone,$sinkholed_ns);
-          clone_record($sinkhole_trie,"*.".$zone,$sinkholed_ns);
-          redo RECORD;
+          clone_record($sinkhole_tree,$zone,$sinkholed_ns);
+          clone_record($sinkhole_tree,"*.".$zone,$sinkholed_ns);
+          return 1;
         } # }}}
       } # }}}
       else { # {{{
         # nameserver is sinkholed, and zone is sinkholed.
         # We're good.
-        #print STDERR "Info: NS $nameserver is is in sinkholed zone $sinkholed_ns and authorative for sinkholed zone $zone\n";
+        print STDERR "Info: NS $nameserver is is in sinkholed zone $sinkholed_ns and authorative for sinkholed zone $zone\n";
       } # }}}
     } # }}}
     else { # {{{
@@ -276,26 +292,19 @@ sub censor_authority { # {{{
         print STDERR "Critical: (new?) NS $nameserver is authorative for sinkholed zone $zone, but $nameserver isn't sinkholed.\n";
         # XXX FIXME RGH: auto-sinkhole new nameserver?
         if ($auto_sinkhole) { # {{{
-          clone_record($sinkhole_trie,$nameserver,$sinkholed_zone);
-          redo RECORD;
+          clone_record($sinkhole_tree,$nameserver,$sinkholed_zone);
+          return 1;
         } # }}}
       } # }}}
       else { # {{{
         # nameserver is NOT sinkholed, and zone is NOT sinkholed.  We're good.
-        #print STDERR "Info: NS $nameserver not sinkholed hosting non-sinkholed zone $zone. Why are we here?\n";
+        print STDERR "Info: NS $nameserver not sinkholed hosting non-sinkholed zone $zone. Why are we here?\n";
       } # }}}
     } # }}}
   } # }}}
 
   # fall through return NO authority or additional records.
-  return undef,undef;
-} # }}}
-
-sub clone_record { # {{{
-  my ($trie,$dest_zone,$source_zone) = @_;
-  my $records = $trie->lookup_data( rev($source_zone) ); # {{{
-  print STDERR "Info: Learning new zone $dest_zone to sinkhole mimicing $source_zone\n";
-  $trie->add_data( rev($dest_zone), $records );
+  return ;
 } # }}}
 
 sub sinkhole_handler { # {{{
@@ -378,6 +387,14 @@ sub wildcardsearch {
   my @parts = reverse( split( m/\./, $domain ) );
   my @wildcards = reverse map { join( ".", '*', reverse( @parts[ 0 .. $_ ] ), ) } 0 .. $#parts - 1;
   return $domain, @wildcards;
+} # }}}
+
+# clone a record in a trie for a new key, mimicing an old key in the same trie
+sub clone_record { # {{{
+  my ($trie,$dest_zone,$source_zone) = @_;
+  my $records = $trie->lookup_data( rev($source_zone) );
+  print STDERR "Info: Learning new zone $dest_zone to sinkhole mimicing $source_zone\n";
+  $trie->add_data( rev($dest_zone), $records );
 } # }}}
 
 $ns->main_loop;
