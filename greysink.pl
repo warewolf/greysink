@@ -19,57 +19,57 @@ package Net::DNS::Resolver::Programmable; # {{{
 {
   no warnings 'redefine';
   sub send { # {{{
-	  my $self = shift;
+      my $self = shift;
 
-	  my $query_packet = $self->make_query_packet(@_);
-	  my $question = ($query_packet->question)[0];
-	  my $domain   = lc($question->qname);
-	  my $rr_type  = $question->qtype;
-	  my $class    = $question->qclass;
+      my $query_packet = $self->make_query_packet(@_);
+      my $question = ($query_packet->question)[0];
+      my $domain   = lc($question->qname);
+      my $rr_type  = $question->qtype;
+      my $class    = $question->qclass;
 
-	  $self->_reset_errorstring;
+      $self->_reset_errorstring;
 
-	  my ($rcode, $answer, $authority, $additional, $headermask );
+      my ($rcode, $answer, $authority, $additional, $headermask );
 
-	  if (defined(my $resolver_code = $self->{resolver_code})) { # {{{
-		  ($rcode, $answer, $authority, $additional, $headermask ) = $resolver_code->($domain, $rr_type, $class);
-	  } # }}}
+      if (defined(my $resolver_code = $self->{resolver_code})) { # {{{
+          ($rcode, $answer, $authority, $additional, $headermask ) = $resolver_code->($domain, $rr_type, $class);
+      } # }}}
 
-	  if (not defined($rcode) or defined($Net::DNS::rcodesbyname{$rcode})) { # {{{
-		  # Valid RCODE, return a packet:
-		  $rcode = 'NOERROR' if not defined($rcode);
+      if (not defined($rcode) or defined($Net::DNS::rcodesbyname{$rcode})) { # {{{
+          # Valid RCODE, return a packet:
+          $rcode = 'NOERROR' if not defined($rcode);
 
-		  if (defined(my $records = $self->{records})) { # {{{
-			  if (ref(my $rrs_for_domain = $records->{$domain}) eq 'ARRAY') {
-				  foreach my $rr (@$rrs_for_domain) {
-					  push(@$answer, $rr)
-						  if  $rr->name  eq $domain
-						  and $rr->type  eq $rr_type
-						  and $rr->class eq $class;
-				  }
-			  }
-		  } # }}}
+          if (defined(my $records = $self->{records})) { # {{{
+              if (ref(my $rrs_for_domain = $records->{$domain}) eq 'ARRAY') {
+                  foreach my $rr (@$rrs_for_domain) {
+                      push(@$answer, $rr)
+                          if  $rr->name  eq $domain
+                          and $rr->type  eq $rr_type
+                          and $rr->class eq $class;
+                  }
+              }
+          } # }}}
 
-		  my $reply = Net::DNS::Packet->new($domain, $rr_type, $class);
-		  $reply->header->qr(1); # query response
-		  $reply->header->rcode($rcode);
-		  $reply->push(question => $query_packet->question); # query section returned to caller (?)
-		  # fill in the response body
-		  $reply->push(answer => @$answer) if $answer;
-		  $reply->push(authority => @$authority) if $authority;
-		  $reply->push(additional => @$additional) if $additional;
+          my $reply = Net::DNS::Packet->new($domain, $rr_type, $class);
+          $reply->header->qr(1); # query response
+          $reply->header->rcode($rcode);
+          $reply->push(question => $query_packet->question); # query section returned to caller (?)
+          # fill in the response body
+          $reply->push(answer => @$answer) if $answer;
+          $reply->push(authority => @$authority) if $authority;
+          $reply->push(additional => @$additional) if $additional;
 
-		  $reply->header->aa(1) if $headermask->{'aa'};
-		  $reply->header->ra(1) if $headermask->{'ra'};
-		  $reply->header->ad(1) if $headermask->{'ad'};
+          $reply->header->aa(1) if $headermask->{'aa'};
+          $reply->header->ra(1) if $headermask->{'ra'};
+          $reply->header->ad(1) if $headermask->{'ad'};
 
-		  return $reply;
-	  } # }}}
-	  else { # {{{
-		  # Invalid RCODE, signal error condition by not returning a packet:
-		  $self->errorstring($rcode);
-		  return undef;
-	  } # }}}
+          return $reply;
+      } # }}}
+      else { # {{{
+          # Invalid RCODE, signal error condition by not returning a packet:
+          $self->errorstring($rcode);
+          return undef;
+      } # }}}
   } # }}}
 } # }}}
 
@@ -81,6 +81,10 @@ sub rev ($) { scalar reverse $_[0]; }
 # debugging messages
 my $verbose = 1;
 
+# do we "learn" new zones hosted by nameservers in sinkholed zones?
+# also: do we "learn" new nameservers for sinkholed zones?
+my $auto_sinkhole = 1;
+
 my $sinkhole_tree  = Tree::Trie->new();
 my $whitelist_tree = Tree::Trie->new();
 
@@ -89,9 +93,9 @@ my $whitelist_tree = Tree::Trie->new();
 # { records => { RR => '* string' } }
 my $sinkhole_records = { # {{{
   records => {
-	A  => '* 86400 IN A 10.1.2.3',
-	NS => '* 86400 IN NS ns.sinkhole.example.com',
-	SOA => '* 86400 IN SOA ns.sinkhole.example.com. cert.example.com.  ( 42 28800 14400 3600000 86400)',
+    A  => '* 86400 IN A 10.1.2.3',
+    NS => '* 86400 IN NS ns.sinkhole.example.com',
+    SOA => '* 86400 IN SOA ns.sinkhole.example.com. cert.example.com.  ( 42 28800 14400 3600000 86400)',
   },
 }; # }}}
 
@@ -112,8 +116,9 @@ $whitelist_tree->add( rev('frost.ath.cx') );
 
 # sinkhole: pass a hashref of { records => { RR => 'rr string' } } # {{{
 # XXX Note! x.com does not match *.x.com.  Wildcards are EXPLICIT, not implied.
-$sinkhole_tree->add_data( rev('dyndns.org'), $sinkhole_records  );
-$sinkhole_tree->add_data( rev('*.dyndns.org'), $sinkhole_records  );
+$sinkhole_tree->add_data( rev('ns1.dyndns.org'), $sinkhole_records  );
+$sinkhole_tree->add_data( rev('ns2.dyndns.org'), $sinkhole_records  );
+$sinkhole_tree->add_data( rev('ns3.dyndns.org'), $sinkhole_records  );
 # }}}
 
 # authorative NS server records, for zones we're sinkholing.
@@ -192,7 +197,7 @@ sub censor_authority { # {{{
   my ($orig_authority,$orig_additional) = @_;
   my ($authority,$additional);
 
-  foreach my $record (@$orig_authority) { # {{{
+  RECORD: foreach my $record (@$orig_authority) { # {{{
     my @record_fields;
 
     # There's two types of records we get back in AUTHORITY sections.
@@ -203,72 +208,93 @@ sub censor_authority { # {{{
     elsif ($record->type() eq 'SOA')
     { @record_fields = qw(name mname); }
 
-	my ($zone,$nameserver) = map { $record->$_() } @record_fields;
+    my ($zone,$nameserver) = map { $record->$_() } @record_fields;
 
-	# either the zone in $zone, or the nameserver in $nameserver could be something we're "authoritive" for.
-	my $sinkholed_ns = first { $sinkhole_tree->lookup( rev lc($_) ) } wildcardsearch($nameserver);
-	my $sinkholed_zone = first { $sinkhole_tree->lookup( rev lc($_) ) } wildcardsearch($zone);
+    # either the zone in $zone, or the nameserver in $nameserver could be something we're "authoritive" for.
+    my $sinkholed_ns = lc( first { $sinkhole_tree->lookup( rev lc($_) ) } wildcardsearch($nameserver) );
+    my $sinkholed_zone = lc( first { $sinkhole_tree->lookup( rev lc($_) ) } wildcardsearch($zone) );
 
-	my $whitelisted_ns = first { $whitelist_tree->lookup( rev lc($_) ) } wildcardsearch($nameserver);
-	my $whitelisted_zone = first { $whitelist_tree->lookup( rev lc($_) ) } wildcardsearch($zone);
+    my $whitelisted_ns = lc( first { $whitelist_tree->lookup( rev lc($_) ) } wildcardsearch($nameserver) );
+    my $whitelisted_zone = lc( first { $whitelist_tree->lookup( rev lc($_) ) } wildcardsearch($zone) );
 
-    if ($whitelisted_zone) {
+    if ($whitelisted_zone) { # {{{
       # zone is whitelisted
-      if (! $whitelisted_ns) {
+      if (! $whitelisted_ns) { # {{{
         # ... but nameserver is not.
         # We should fake out that we're the only authorative NS for the zone,
         # so that other (potentially sinkholed) zones hosted by this nameserver
         # are inaccessible by clients unless they go through us for sinkhole checking.
-        print STDERR "Warning: zone $zone is whitelisted under $whitelisted_zone, but nameserver $nameserver is not.\n"
-      } else {
+        print STDERR "Warning: zone $zone is whitelisted under $whitelisted_zone, but its nameserver $nameserver is not.\n"
+      } # }}}
+      else { # {{{
         # ... and NS is whitelisted.
         # We're good.
         print STDERR "Info: zone $zone and ns $nameserver are both whitelisted.\n";
-      }
-    } else {
+      } # }}}
+    } # }}}
+    else { # {{{
       # zone is not whitelisted
-      if ( ! $whitelisted_ns ) {
+      if ( ! $whitelisted_ns ) { # {{{
         # ... and nameserver is not whitelisted
         # we should check sinkholes to see if the NS is sinkholed.
         #print STDERR "Proceed carefully: zone $zone is not whitelisted, neither is its authorative NS $nameserver.  Sinkholes should be checked.\n";
         # fall through to sinkhole ns/zone checking
-      } else {
+      } # }}}
+      else { # {{{
         # ... but nameserver is whitelisted.
         # we should check sinkholes to see if the zone is sinkholed.
-        #print STDERR "Warning: zone $zone is not whitelisted, but authorative NS $nameserver is.\n";
+        print STDERR "Warning: zone $zone is not whitelisted, but authorative NS $nameserver is whitelisted under $whitelisted_ns.\n";
+        # XXX FIXME RGH: auto-whitelist?
         # fall through to sinkhole ns/zone checking
-      }
-    }
+      } # }}}
+    } # }}}
 
     # if whitelisting had ANYTHING to do with the zone or nameserver, we should not have reached here.
 
-	if ( $sinkholed_ns ) { # {{{
+    if ( $sinkholed_ns ) { # {{{
       if ( ! $sinkholed_zone) { # {{{
-	    # nameserver is sinkholed, but zoneis NOT sinkholed.
-	    # This is a new zone hosted by a sinkholed NS we don't know about.
-	    print STDERR "Critical: NS $nameserver in sinkholed zone $sinkholed_ns authorative for non-sinkholed (new?) zone $zone\n";
+        # nameserver is sinkholed, but zoneis NOT sinkholed.
+        # This is a new zone hosted by a sinkholed NS we don't know about.
+        print STDERR "Critical: NS $nameserver in sinkholed zone $sinkholed_ns authorative for non-sinkholed (new?) zone $zone.\n";
+        if ($auto_sinkhole) { # {{{
+          auto_sinkhole($zone,$sinkholed_ns);
+          auto_sinkhole("*.".$zone,$sinkholed_ns);
+          redo RECORD;
+        } # }}}
       } # }}}
       else { # {{{
         # nameserver is sinkholed, and zone is sinkholed.
         # We're good.
-	    print STDERR "Info: NS $nameserver is is in sinkholed zone $sinkholed_ns and authorative for sinkholed zone $zone\n";
+        #print STDERR "Info: NS $nameserver is is in sinkholed zone $sinkholed_ns and authorative for sinkholed zone $zone\n";
       } # }}}
-	} # }}}
+    } # }}}
     else { # {{{
       if ( $sinkholed_zone ) { # {{{
         # nameserver is NOT sinkholed, but zone is sinkholed.
         # This is a new nameserver that we don't know about, for a sinkholed zone.
-	    print STDERR "Critical: NS $nameserver is authorative for sinkholed zone $zone, but $nameserver isn't sinkholed.\n";
+        print STDERR "Critical: (new?) NS $nameserver is authorative for sinkholed zone $zone, but $nameserver isn't sinkholed.\n";
+        # XXX FIXME RGH: auto-sinkhole new nameserver?
+        if ($auto_sinkhole) { # {{{
+          auto_sinkhole($nameserver,$sinkholed_zone);
+          redo RECORD;
+        } # }}}
       } # }}}
       else { # {{{
         # nameserver is NOT sinkholed, and zone is NOT sinkholed.  We're good.
-	    #print STDERR "Info: NS $nameserver not sinkholed hosting non-sinkholed zone $zone. Why are we here?\n";
+        #print STDERR "Info: NS $nameserver not sinkholed hosting non-sinkholed zone $zone. Why are we here?\n";
       } # }}}
     } # }}}
   } # }}}
 
   # fall through return NO authority or additional records.
   return undef,undef;
+} # }}}
+
+sub auto_sinkhole { # {{{
+  my ($dest_zone,$source_zone) = @_;
+  my $records = $sinkhole_tree->lookup_data( rev($source_zone) ); # {{{
+  print STDERR "Info: Learning new zone $dest_zone to sinkhole mimicing $source_zone\n";
+  $sinkhole_tree->add_data( rev($dest_zone), $records );
 } # }}}
 
 sub sinkhole_handler { # {{{
