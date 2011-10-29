@@ -84,6 +84,7 @@ my $verbose = 1;
 # do we "learn" new zones hosted by nameservers in sinkholed zones?
 # also: do we "learn" new nameservers for sinkholed zones?
 my $auto_sinkhole = 1;
+my $auto_whitelist = 1;
 
 my $sinkhole_tree  = Tree::Trie->new();
 my $whitelist_tree = Tree::Trie->new();
@@ -257,8 +258,8 @@ sub censor_authority { # {{{
         # This is a new zone hosted by a sinkholed NS we don't know about.
         print STDERR "Critical: NS $nameserver in sinkholed zone $sinkholed_ns authorative for non-sinkholed (new?) zone $zone.\n";
         if ($auto_sinkhole) { # {{{
-          auto_sinkhole($zone,$sinkholed_ns);
-          auto_sinkhole("*.".$zone,$sinkholed_ns);
+          clone_record($sinkhole_trie,$zone,$sinkholed_ns);
+          clone_record($sinkhole_trie,"*.".$zone,$sinkholed_ns);
           redo RECORD;
         } # }}}
       } # }}}
@@ -275,7 +276,7 @@ sub censor_authority { # {{{
         print STDERR "Critical: (new?) NS $nameserver is authorative for sinkholed zone $zone, but $nameserver isn't sinkholed.\n";
         # XXX FIXME RGH: auto-sinkhole new nameserver?
         if ($auto_sinkhole) { # {{{
-          auto_sinkhole($nameserver,$sinkholed_zone);
+          clone_record($sinkhole_trie,$nameserver,$sinkholed_zone);
           redo RECORD;
         } # }}}
       } # }}}
@@ -290,11 +291,11 @@ sub censor_authority { # {{{
   return undef,undef;
 } # }}}
 
-sub auto_sinkhole { # {{{
-  my ($dest_zone,$source_zone) = @_;
-  my $records = $sinkhole_tree->lookup_data( rev($source_zone) ); # {{{
+sub clone_record { # {{{
+  my ($trie,$dest_zone,$source_zone) = @_;
+  my $records = $trie->lookup_data( rev($source_zone) ); # {{{
   print STDERR "Info: Learning new zone $dest_zone to sinkhole mimicing $source_zone\n";
-  $sinkhole_tree->add_data( rev($dest_zone), $records );
+  $trie->add_data( rev($dest_zone), $records );
 } # }}}
 
 sub sinkhole_handler { # {{{
