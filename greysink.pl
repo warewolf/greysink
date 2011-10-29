@@ -125,23 +125,33 @@ $whitelist_tree->add( rev('www.richardharman.com') );
 
 # sinkhole: pass a hashref of { records => { RR => 'rr string' } } # {{{
 # XXX Note! x.com does not match *.x.com.  Wildcards are EXPLICIT, not implied.
-$sinkhole_tree->add_data( rev('ns1.dyndns.org'), $sinkhole_records  );
-$sinkhole_tree->add_data( rev('ns2.dyndns.org'), $sinkhole_records  );
-$sinkhole_tree->add_data( rev('ns3.dyndns.org'), $sinkhole_records  );
+$sinkhole_tree->add_data( rev('*.dyndns.org'), $sinkhole_records  );
+$sinkhole_tree->add_data( rev('richardharman.com'), $sinkhole_records  );
+$sinkhole_tree->add_data( rev('*.richardharman.com'), $sinkhole_records  );
 # }}}
 
 # authorative NS server records, for zones we're sinkholing.
 $sinkhole_tree->add_data( rev('ns.sinkhole.example.com'),  $authorative_ns_records  );
 
-my $recursive = Net::DNS::Resolver->new( # {{{
+my $recursive_resolver = Net::DNS::Resolver->new( # {{{
   recursive => 1,
   debug     => $verbose,
 ); # }}}
 
+# programmable resolvers for filtering
+# recursive - for communicating with the root DNS infrastructure
+my $recursive = Net::DNS::Resolver::Programmable->new( # {{{
+  resolver_code => \&recursive_handler,
+); # }}}
+
+# sinkhole - for runtime generating sinkholed responses
+# to zones and/or nameservers we don't like
 my $sinkhole = Net::DNS::Resolver::Programmable->new( # {{{
   resolver_code => \&sinkhole_handler,
 ); # }}}
 
+# whitelist - for selectivly whitelisting things that otherwise
+# would be sinkholed.  Note: uses $resolver for looking things up
 my $whitelist = Net::DNS::Resolver::Programmable->new( # {{{
   resolver_code => \&whitelist_handler,
 ); # }}}
@@ -208,9 +218,6 @@ sub reply_handler { # {{{
 sub censor_authority { # {{{
   my ($authority,$additional) = @_;
 
-  # flag if we censored a record, and the lookup in reply_handler needs to be repeated
-  my $censored = 0;
-
   foreach my $record (@$authority) { # {{{
     my @record_fields;
 
@@ -252,7 +259,6 @@ sub censor_authority { # {{{
         # ... and nameserver is not whitelisted
         # we should check sinkholes to see if the NS is sinkholed.
         print STDERR "Proceed carefully: zone $zone is not whitelisted, neither is its authorative NS $nameserver.  Sinkholes should be checked.\n";
-        # fall through to sinkhole ns/zone checking
       } # }}}
       else { # {{{
         # ... but nameserver is whitelisted.
@@ -298,16 +304,25 @@ sub censor_authority { # {{{
         } # }}}
       } # }}}
       else { # {{{
-        # nameserver is NOT sinkholed, and zone is NOT sinkholed.  We're good.
+        # nameserver is NOT sinkholed, and zone is NOT sinkholed.
         print STDERR "Info: NS $nameserver not sinkholed hosting non-sinkholed zone $zone. Why are we here?\n";
+
+        # Because we can't trust that these additional/authority records
+        # will not conflict with a sinkholed zone, we really need to remove them.
+
+        # kill the AUTHORITY records
+        map { $_ = undef } @$authority;
+        # kill the ADDITIONAL records
+        map { $_ = undef } @$additional;
+        return; # this is required, otherwise we'll try to iterate through undef objects above.
       } # }}}
     } # }}}
   } # }}}
 
-  # fall through return NO authority or additional records.
-  return ;
+  return;
 } # }}}
 
+# sinkhole resolver based on sinkhole trie - returns records from the sinkhole trie, or NXDOMAIN if the RR doesn't exist in the trie.
 sub sinkhole_handler { # {{{
   my ( $qname, $qtype, $qclass ) = @_;
   my ( $rcode, @answer, @authority, @additional, $headermask );
@@ -360,6 +375,7 @@ sub sinkhole_handler { # {{{
   return ( $rcode, \@answer, \@authority, \@additional, $headermask );
 } # }}}
 
+# whitelist resolver based on the whitelist trie - performs recursion for whitelisted records/zones
 sub whitelist_handler { # {{{
   my ( $qname, $qtype, $qclass ) = @_;
   my ( $rcode, @answer, @authority, @additional, $headermask );
@@ -367,19 +383,32 @@ sub whitelist_handler { # {{{
   my $zone = first { $whitelist_tree->lookup( rev lc($_) ) } wildcardsearch($qname);
   # $zone might be undef if no responses
   if ($zone) { # response was found {{{
-    my $answer = $recursive->send( $qname, $qtype, $qclass );
+    my $answer = $recursive_resolver->send( $qname, $qtype, $qclass );
 
     # clone the response
     $rcode        = $answer->header->rcode;
     @answer       = $answer->answer;
-    # XXX: returning these permits real authorative NS leakage back to the client
-    #@additional   = $answer->additional;
-    #@authority    = $answer->authority;
-    #$headermask->{'aa'} = 1 if $answer->header->aa;
   } # }}}
   else { # no zone found in our trie, return custom rcode IGNORE {{{
     $rcode = "IGNORE";
   } # }}}
+
+  return ( $rcode, \@answer, \@authority, \@additional, $headermask );
+} # }}}
+
+# handler for recursive queries (so we can remove authority/additional)
+sub recursive_handler { # {{{
+  my ( $qname, $qtype, $qclass ) = @_;
+  print STDERR "recursive_handler: Q $qname $qtype $qclass\n";
+  my ( $rcode, @answer, @authority, @additional, $headermask );
+
+  my $answer = $recursive_resolver->send( $qname, $qtype, $qclass );
+
+  # clone the response
+  $rcode        = $answer->header->rcode;
+  @answer       = $answer->answer;
+  @additional   = $answer->additional;
+  @authority    = $answer->authority;
 
   return ( $rcode, \@answer, \@authority, \@additional, $headermask );
 } # }}}
