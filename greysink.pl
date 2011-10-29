@@ -119,6 +119,7 @@ my $authorative_ns_records = { # {{{
 # XXX FIXME: There's also a bug of the authorative NS getting leaked back
 # when we whitelist third.second.tld, and there's an authorative NS for second.tld.
 $whitelist_tree->add( rev('402ra.blogdns.com') );
+$whitelist_tree->add( rev('www.richardharman.com') );
 #$whitelist_tree->add( rev('ath.cx') );
 # }}}
 
@@ -199,7 +200,7 @@ sub reply_handler { # {{{
   goto CENSOR_REDO if ( ($auto_sinkhole || $auto_whitelist) && censor_authority(\@auth,\@add) );
   # XXX FIXME RGH: We need to censor auth/add for whitelisted individual records,
   # so the real auth/add records don't get leaked back to the client.
-  return ( $rcode, \@ans, \@auth,\@add , $aa );
+  return ( $rcode, \@ans, \@auth, \@add , $aa );
 
 } # }}}
 
@@ -321,6 +322,7 @@ sub sinkhole_handler { # {{{
       # make our sinkholed response look like the question
       my $answer_rr = $record->{records}->{$qtype};
       $answer_rr =~ s/\*/$qname/g;
+      # add the sinkholed RR to our answer section
       push @answer, Net::DNS::RR->new($answer_rr);
 
       # make a NS record for the authority section
@@ -328,6 +330,7 @@ sub sinkhole_handler { # {{{
       $ns_rr =~ s/\*/$zone/g;
       # hide that we might be wildcarding stuff
       $ns_rr =~ s/^\*\.//g;
+      # add the sinkholed NS to our authority section
       push @authority,Net::DNS::RR->new($ns_rr);
 
       # make an A record of the NS in the authority section for the additional section
@@ -342,6 +345,7 @@ sub sinkhole_handler { # {{{
       my $ns_a = $ns_zone_records->{records}->{A};
       # change the * to be the name of our nameserver
       $ns_a =~ s/\*/$ns_name/;
+      # add the A record of our sinkholed NS to the additional section
       push @additional,Net::DNS::RR->new($ns_a);
       $rcode = "NOERROR";
     } # }}}
@@ -368,9 +372,10 @@ sub whitelist_handler { # {{{
     # clone the response
     $rcode        = $answer->header->rcode;
     @answer       = $answer->answer;
-    @additional   = $answer->additional;
-    @authority    = $answer->authority;
-    $headermask->{'aa'} = 1 if $answer->header->aa;
+    # XXX: returning these permits real authorative NS leakage back to the client
+    #@additional   = $answer->additional;
+    #@authority    = $answer->authority;
+    #$headermask->{'aa'} = 1 if $answer->header->aa;
   } # }}}
   else { # no zone found in our trie, return custom rcode IGNORE {{{
     $rcode = "IGNORE";
