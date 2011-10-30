@@ -15,9 +15,9 @@ $Net::DNS::rcodesbyname{IGNORE} = 11;
 %Net::DNS::rcodesbyval = reverse %Net::DNS::rcodesbyname;
 
 # lifted from Net::DNS::Resolver::Programmable, and hacked up to support returning records in the additional/authority sections
-package Net::DNS::Resolver::Programmable; # {{{
+package Net::DNS::Resolver::FullyProgrammable; # {{{
 {
-  no warnings 'redefine';
+  use parent qw(Net::DNS::Resolver::Programmable);
   sub send { # {{{
       my $self = shift;
 
@@ -140,19 +140,19 @@ my $recursive_resolver = Net::DNS::Resolver->new( # {{{
 
 # programmable resolvers for filtering
 # recursive - for communicating with the root DNS infrastructure
-my $recursive = Net::DNS::Resolver::Programmable->new( # {{{
+my $recursive = Net::DNS::Resolver::FullyProgrammable->new( # {{{
   resolver_code => \&recursive_handler,
 ); # }}}
 
 # sinkhole - for runtime generating sinkholed responses
 # to zones and/or nameservers we don't like
-my $sinkhole = Net::DNS::Resolver::Programmable->new( # {{{
+my $sinkhole = Net::DNS::Resolver::FullyProgrammable->new( # {{{
   resolver_code => \&sinkhole_handler,
 ); # }}}
 
 # whitelist - for selectivly whitelisting things that otherwise
 # would be sinkholed.  Note: uses $resolver for looking things up
-my $whitelist = Net::DNS::Resolver::Programmable->new( # {{{
+my $whitelist = Net::DNS::Resolver::FullyProgrammable->new( # {{{
   resolver_code => \&whitelist_handler,
 ); # }}}
 
