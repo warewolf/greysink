@@ -1,3 +1,5 @@
 greysink is a grey/black/whitelisting DNS sinkhole.
 
 It blossomed out of the need to sinkhole malicious domain names.
+
+TODO: make this work in POE, because right now this is single threaded, and blocking.
