@@ -1,0 +1,8 @@
+REMEMBER: EVERYTHING IS ASYNC PASSING STATE.
+
+Query comes in
+ - we need to be able to do queries in "parallel" - whitelist, sinkhole, recursive
+ - make a chain of events where one can terminate the chain early
+   - post to whitelist w/ response callback
+   - if whitelist fails, post to sinkhole w/ response callback
+     - if sinkhole fails, post to recursive w/ response callback
