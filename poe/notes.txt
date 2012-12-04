@@ -1,8 +1,30 @@
 REMEMBER: EVERYTHING IS ASYNC PASSING STATE.
 
+To inotify for data file change(s):
+ - set up inline states for monitoring the file
+ - inotify must send an event to its own session first, then my code can send events to other sessions
+
 Query comes in
  - we need to be able to do queries in "parallel" - whitelist, sinkhole, recursive
  - make a chain of events where one can terminate the chain early
    - post to whitelist w/ response callback
    - if whitelist fails, post to sinkhole w/ response callback
      - if sinkhole fails, post to recursive w/ response callback
+
+Store greysink data inside an object
+ - every state will have access to the data
+   - every state can modify the data
+ - FIXME: need to document which method calls are POE state method calls and which aren't
+
+
+POE event boilerplate:
+  sub handle_event {
+    my ($kernel, $heap, $parameter) = @_[KERNEL, HEAP, ARG0]; # @_[OBJECT]
+    ...;
+  }
+
+DETAILS:
+ - initialize greysink DNS stuff in an object
+   - configure/populate the records inside it
+ - Set up POE handling of DNS as an object state
+ - Set up POE handling of config file as inline states
