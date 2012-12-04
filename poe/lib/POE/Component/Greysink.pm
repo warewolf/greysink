@@ -9,7 +9,7 @@ sub spawn {
   my %args = @_;
   my $self = bless { }, $class;
 
-  POE::Session->create(
+  my $greysink_session = POE::Session->create(
 	object_states => [
 	  $self => [ qw(_start _stop complete step_a step_b step_c) ],
 	],

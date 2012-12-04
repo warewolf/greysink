@@ -30,6 +30,7 @@ exit 0;
     $kernel->post( 'dns_server', 'add_handler', 
         { 
           event => 'query_listener', 
+          # session => 'destination_session_event_is_in',
           label => 'foobar', 
           match => '.',
         } 

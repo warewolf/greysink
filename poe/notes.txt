@@ -1,5 +1,11 @@
 REMEMBER: EVERYTHING IS ASYNC PASSING STATE.
 
+SHOWSTOPPER: need TCP support!
+ - UDP queries can come in - and get an overly large response. We respond in UDP.
+ - Client notices the response was truncated, and retries in TCP to get the full response.
+   - Two problems: how do we truncate our response, and we need to listen on TCP.
+   - Check if the recursive resolver code supports TCP.
+
 To inotify for data file change(s):
  - set up inline states for monitoring the file
  - inotify must send an event to its own session first, then my code can send events to other sessions
