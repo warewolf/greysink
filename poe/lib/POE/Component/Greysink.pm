@@ -4,16 +4,22 @@ use strict;
 use warnings;
 use Data::Dumper;
 
+
+# Spawn a new PoCo::Greysink session.  This basically is a
+# constructor, but it isn't named "new" because it doesn't create a
+# usable object.  Instead, it spawns the object off as a session.
+
 sub spawn {
   my $class = shift;
   my %args = @_;
   my $self = bless { }, $class;
 
-  my $greysink_session = POE::Session->create(
+  $self->{session_id} = POE::Session->create(
 	object_states => [
 	  $self => [ qw(_start _stop complete step_a step_b step_c) ],
 	],
   );
+  return $self;
 }
 
 sub _stop {#{{{

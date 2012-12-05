@@ -119,15 +119,13 @@ my $authorative_ns_records = { # {{{
 # XXX FIXME: There's also a bug of the authorative NS getting leaked back
 # when we whitelist third.second.tld, and there's an authorative NS for second.tld.
 $whitelist_tree->add( rev('402ra.blogdns.com') );
-$whitelist_tree->add( rev('www.richardharman.com') );
+$whitelist_tree->add( rev('richardharman.com') );
 #$whitelist_tree->add( rev('ath.cx') );
 # }}}
 
 # sinkhole: pass a hashref of { records => { RR => 'rr string' } } # {{{
 # XXX Note! x.com does not match *.x.com.  Wildcards are EXPLICIT, not implied.
 $sinkhole_tree->add_data( rev('*.dyndns.org'), $sinkhole_records  );
-$sinkhole_tree->add_data( rev('richardharman.com'), $sinkhole_records  );
-$sinkhole_tree->add_data( rev('*.richardharman.com'), $sinkhole_records  );
 # }}}
 
 # authorative NS server records, for zones we're sinkholing.
