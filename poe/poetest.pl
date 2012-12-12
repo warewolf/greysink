@@ -39,9 +39,9 @@ exit 0;
   }
 
   sub query_listener {
-    my ($qname,$qclass,$qtype,$callback) = @_[ARG0..ARG3];
+    my ($qname,$qclass,$qtype,$callback,$origin) = @_[ARG0..ARG4];
     my ($rcode, @ans, @auth, @add);
-    print STDERR "Listener: QN: $qname QC: $qclass QT: $qtype\n";
+    print STDERR "Listener: From: $origin QN: $qname QC: $qclass QT: $qtype\n";
 
     if ($qtype eq "A") {
       my ($ttl, $rdata) = (3600, "10.1.2.3");

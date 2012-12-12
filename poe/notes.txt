@@ -12,18 +12,16 @@ To inotify for data file change(s):
  - set up inline states for monitoring the file
  - inotify must send an event to its own session first, then my code can send events to other sessions
 
-Query comes in
- - we need to be able to do queries in "parallel" - whitelist, sinkhole, recursive
- - make a chain of events where one can terminate the chain early
-   - post to whitelist w/ response callback
-   - if whitelist fails, post to sinkhole w/ response callback
-     - if sinkhole fails, post to recursive w/ response callback
+EVENT FLOW:
 
-Store greysink data inside an object
- - every state will have access to the data
-   - every state can modify the data
- - FIXME: need to document which method calls are POE state method calls and which aren't
-
+Query comes in to ::Sever
+ - ::Server stores response callback in $_[HEAP]->{.. sockaddr .. query ..}, for later use
+ - ::Server passes query class/type/record to all ::Sink modules, with postback(?) w/ args containing class/type/record
+   - ::Sink modules postback to ::Server [ $alias, $rcode, \@ans, \@auth, \@add , $aa] (?)
+ - ::Server stores ::Sink responses in $_[HEAP]->{PENDING}->{$alias}->{$query_class}->{$query_type}->{$query_record} = { hash data structure }
+ - ::Server on receiving responses checks if all sink_aliases have filled in the structure
+   - if yes, fire ::Server check_censor for each authority & additional record
+     - check_sensor posts to sink_aliases 
 
 POE event boilerplate:
   sub handle_event {

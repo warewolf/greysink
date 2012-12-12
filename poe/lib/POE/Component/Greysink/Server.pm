@@ -1,4 +1,4 @@
-package POE::Component::Greysink;
+package POE::Component::Greysink::Server;
 use POE;
 use strict;
 use warnings;
@@ -9,10 +9,12 @@ use Data::Dumper;
 # constructor, but it isn't named "new" because it doesn't create a
 # usable object.  Instead, it spawns the object off as a session.
 
+# this will set up the DNS listener session, sending events back to the Greysink::Server session.
 sub spawn {
   my $class = shift;
   my %args = @_;
   my $self = bless { }, $class;
+  print Data::Dumper->Dump([\%args],[qw($args)]);
 
   $self->{session_id} = POE::Session->create(
 	object_states => [
@@ -20,6 +22,19 @@ sub spawn {
 	],
   );
   return $self;
+}
+
+# query request handler
+sub query {
+  # posts to each resolver object with a postback of resolver return state - fallthrough or hit - postback in ::Server session stores status in _HEAP per socket/port pair
+  # when hit, 
+}
+
+sub resolver_response {
+  # event listening for resolver postbacks - one event per resolver
+  # stores status in _HEAP per socket/port pair and resolver friendly name
+  # ARGS: resolver, hit?, record_ref
+  # ... this needs to know how many/what names there are of resolvers.
 }
 
 sub _stop {#{{{
