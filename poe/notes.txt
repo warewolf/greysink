@@ -15,13 +15,15 @@ To inotify for data file change(s):
 EVENT FLOW:
 
 Query comes in to ::Sever
- - ::Server stores response callback in $_[HEAP]->{.. sockaddr .. query ..}, for later use
+ - ::Server stores query + response callback in $_[HEAP]->{.. sockaddr .. query ..}, for later use
  - ::Server passes query class/type/record to all ::Sink modules, with postback(?) w/ args containing class/type/record
    - ::Sink modules postback to ::Server [ $alias, $rcode, \@ans, \@auth, \@add , $aa] (?)
  - ::Server stores ::Sink responses in $_[HEAP]->{PENDING}->{$alias}->{$query_class}->{$query_type}->{$query_record} = { hash data structure }
  - ::Server on receiving responses checks if all sink_aliases have filled in the structure
-   - if yes, fire ::Server check_censor for each authority & additional record
-     - check_sensor posts to sink_aliases 
+   - If yes, ::Server probes each sink via call for nameserver and zone
+     - if any return censorship is required:
+       - ::Server tells the ::Sink to learn the new zone and/or nameserver (steal logic from greysink.pl)
+       - ::Server "loops" by posting same query to itself
 
 POE event boilerplate:
   sub handle_event {
