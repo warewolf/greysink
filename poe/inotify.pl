@@ -26,7 +26,8 @@ sub _start {
             path => '.',
             mask  => IN_CLOSE_WRITE,
             event => 'notification',
-            args => [ "argument_on_notification" ]
+            args => [ "argument_on_notification" ],
+            session => "mtfnpy",
          } );
     return;  
 }

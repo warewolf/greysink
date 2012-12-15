@@ -20,7 +20,11 @@ sub spawn {
 	args => [ \%args,
 	],
 	object_states => [
-	  $self => [ qw(_start _stop complete step_a step_b step_c query_handler resolver_response) ],
+	  $self => [ qw(_start _stop
+                        query_handler resolver_response
+
+                        complete step_a step_b step_c
+                   ) ],
 	],
   );
   return $self;
@@ -32,11 +36,15 @@ sub query_handler {
   my ($rcode, @ans, @auth, @add);
   printf STDERR "Server query_handler: QO: %s QC: %s QT: %s QN: %s\n",$origin,$qclass,$qtype,$qname;
 
+  # send queries to sinkholes
   foreach my $sink (@{$heap->{greysink}->{sinks}}) {
-    # XXX RGH FIXME post w/ postback to resolver_response
-    my $postback = $session->postback("resolver_response","dns_connection_socketpair_maybe");
+    # give the sinkhole a method to record its response, and tie it to the origin
+    my $postback = $session->postback("resolver_response",$origin);
+    # ask the sink to do a lookup, w/ the query + postback to respond through
     $kernel->post($sink,"lookup",$postback,$qname,$qclass,$qtype);
   }
+
+  ### XXX FIXME TEMPORARY CODE BE HERE
 
   if ($qtype eq "A") {
     my ($ttl, $rdata) = (3600, "10.1.2.3");
@@ -47,7 +55,7 @@ sub query_handler {
   }
 
   $callback->($rcode, \@ans, \@auth, \@add, { aa => 1 });
-  undef;
+  ### XXX FIXME TEMPORARY CODE BE HERE
 }
 
 sub resolver_response {

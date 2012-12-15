@@ -5,6 +5,13 @@ use warnings;
 use lib qw(lib);
 use POE qw(Component::Greysink::Server Component::Greysink::Sink Component::Client::DNS);
 use Data::Dumper;
+use POEx::Inotify;
+use Linux::Inotify2;
+
+
+# inotify handler used globally - monitor requests get sent back to sessions that requested them
+# which means the sink sessions have to request them.
+POEx::Inotify->spawn( alias=>'inotify' );
 
 # resolver used globally
 my $named = POE::Component::Client::DNS->spawn(
@@ -17,6 +24,7 @@ my $whitelist_sink_session = POE::Component::Greysink::Sink->spawn(
   alias => "whitelist", # what our alias is for the Greysink server to know us by
   list => "whitelist.txt", # where to get our list of zones that are spoofed
   source => "external", # authorative NS and spoofed records are external (but will be redacted)
+  inotify => "inotify", # tell sink where our inotify session is
 );
 
 # blacklist sinkhole session - uses above resolver
@@ -25,6 +33,7 @@ my $blacklist_sink_session = POE::Component::Greysink::Sink->spawn(
   alias => "blacklist", # what our alias is for the Greysink server to know us by
   list => "blacklist.txt", # where to get our list of zones that are spoofed
   source => "internal", # authorative NS and spoofed records are internal
+  inotify => "inotify", # tell sink where our inotify session is
   authority => {
     A => '* 86400 IN A 192.168.100.100',
     NS => '* 86400 IN NS ns.sinkhole.example.com',
