@@ -16,7 +16,9 @@ sub spawn {
   print Data::Dumper->Dump([\%args],[qw($args)]);
 
   $self->{session_id} = POE::Session->create(
-        args => [ %args, ],
+        args => [
+          map { defined($args{$_}) ? ( $_, $args{$_} ) : () } qw(resolver alias list inotify authority records),
+         ],
         object_states => [
           $self => [ qw(_start _stop lookup list_change learn) ],
         ],
@@ -33,6 +35,21 @@ sub list_change {
   my ($self, $kernel, $heap, $session, $e, $args) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0, ARG1];
   print "File ready: ", $e->fullname, "\n";
   $kernel->call($session,"load_data");
+}
+
+sub load_data {
+  my ($self, $kernel, $heap, $session, %args ) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0..$#_];
+
+  # set up Trie
+  $heap->{trie} = Tree::Trie->new({deepsearch=> "exact"});
+  open(LIST,"<",$heap->{list}) or die "Couldn't open list file $heap->{list}";
+
+  if (defined($heap->{records})) {
+    # we have RRs for queries that match our Trie
+
+  } else {
+    # we don't have RRs for queries that match our Trie.  Therefore
+  }
 }
 
 sub _start {#{{{
@@ -63,15 +80,6 @@ sub _start {#{{{
   # set up and populate trie
   $kernel->call($session => "load_data");
 }#}}}
-
-sub load_data {
-  my ($self, $kernel, $heap, $session, %args ) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0..$#_];
-
-  # set up Trie
-  $heap->{trie} = Tree::Trie->new({deepsearch=> "exact"});
-  open(LIST,"<",$heap->{list}) or die "Couldn't open list file $heap->{list}";
-  # open 
-}
 
 sub _stop {#{{{
   print "Session ", $_[SESSION]->ID, " has stopped.\n";

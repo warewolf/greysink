@@ -17,8 +17,9 @@ sub spawn {
   print Data::Dumper->Dump([\%args],[qw($args)]);
 
   $self->{session_id} = POE::Session->create(
-	args => [ \%args,
-	],
+	args => [
+          map { defined($args{$_}) ? ($_,$args{$_}) : () } qw(recursive learn sink_aliases resolver port address),
+        ],
 	object_states => [
 	  $self => [ qw(_start _stop
                         query_handler resolver_response
@@ -72,16 +73,17 @@ sub _stop {#{{{
 }#}}}
 
 sub _start {#{{{
-  my ($self, $kernel, $heap, $session, $args_ref) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0];
+  my ($self, $kernel, $heap, $session, %args) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0.. $#_];
   print "Session ", $session->ID, " has started.\n";
   $kernel->alias_set("greysink");
-  print Data::Dumper->Dump([$args_ref],[qw($greysink_server_args)]);
 
   # save off our "child" sink aliases
-  $heap->{greysink}->{sinks} = $args_ref->{sink_aliases};
+  $heap->{greysink}->{sinks} = $args{sink_aliases};
 
-  # XXX make DNS server port configurable through ARGS
-  my $dns_server = POE::Component::Server::DNS->spawn( alias => 'dns_server',port=>5252 );
+  my $dns_server = POE::Component::Server::DNS->spawn(
+    map { defined($args{$_}) ? ($_ , $args{$_}) : () } qw(port address resolver_opts),
+    alias => 'dns_server',
+  );
 
   # set up DNS listener
   $kernel->post( 'dns_server', 'add_handler', {
