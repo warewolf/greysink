@@ -1,4 +1,4 @@
-package POE::Component::Greysink::Server;
+package POE::Component::Greysink::Handler;
 use POE qw(Component::Server::DNS);
 use strict;
 use warnings;
@@ -9,16 +9,15 @@ use Data::Dumper;
 # constructor, but it isn't named "new" because it doesn't create a
 # usable object.  Instead, it spawns the object off as a session.
 
-# this will set up the DNS listener session, sending events back to the Greysink::Server session.
+# this will set up the DNS listener session, sending events back to the Greysink::Handler session.
 sub spawn {
   my $class = shift;
   my %args = @_;
   my $self = bless { }, $class;
-  print Data::Dumper->Dump([\%args],[qw($args)]);
 
   $self->{session_id} = POE::Session->create(
 	args => [
-          map { defined($args{$_}) ? ($_,$args{$_}) : () } qw(recursive learn sink_aliases resolver port address),
+          map { defined($args{$_}) ? ($_,$args{$_}) : () } qw(recursive learn sink_aliases resolver port address alias server_alias),
         ],
 	object_states => [
 	  $self => [ qw(_start _stop
@@ -26,26 +25,30 @@ sub spawn {
 
                         complete step_a step_b step_c
                    ) ],
+	  $self => { _child => 'default' },
 	],
-  );
+  )->ID();
   return $self;
 }
 
-# query request handler - this is hit by POE::Component::Client::DNS
+sub default { # {{{
+  my ($self, $kernel, $heap, $session, $source, $dest) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0, ARG1];
+} # }}}
+
 sub query_handler {
   my ($self, $kernel, $heap, $session, $qname,$qclass,$qtype,$callback,$origin) = @_[OBJECT, KERNEL, HEAP, SESSION,ARG0..ARG4];
   my ($rcode, @ans, @auth, @add);
-  printf STDERR "Server query_handler: QO: %s QC: %s QT: %s QN: %s\n",$origin,$qclass,$qtype,$qname;
 
   # send queries to sinkholes
-  foreach my $sink (@{$heap->{greysink}->{sinks}}) {
+  foreach my $sink_name (@{$heap->{greysink}->{sinks}}) {
+    printf STDERR "Handler query_handler: Sink: %s, QO: %s QC: %s QT: %s QN: %s\n",$sink_name, $origin,$qclass,$qtype,$qname;
     # give the sinkhole a method to record its response, and tie it to the origin
     my $postback = $session->postback("resolver_response",$origin);
     # ask the sink to do a lookup, w/ the query + postback to respond through
-    $kernel->post($sink,"lookup",$postback,$qname,$qclass,$qtype);
+    $kernel->post($sink_name,"lookup",$postback,$qname,$qclass,$qtype);
   }
 
-  ### XXX FIXME TEMPORARY CODE BE HERE
+  ### XXX FIXME TEMPORARY CODE BE HERE # {{{
 
   if ($qtype eq "A") {
     my ($ttl, $rdata) = (3600, "10.1.2.3");
@@ -56,12 +59,13 @@ sub query_handler {
   }
 
   $callback->($rcode, \@ans, \@auth, \@add, { aa => 1 });
-  ### XXX FIXME TEMPORARY CODE BE HERE
+  ### XXX FIXME TEMPORARY CODE BE HERE # }}}
 }
 
 sub resolver_response {
-  my ($self, $kernel, $heap, $session, $passthru,$passback) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0, ARG1];
-  print Data::Dumper->Dump([$passthru,$passback],[qw($passthru $passback)]);
+  my ($self, $kernel, $heap, $session, $creation_args, $called_args) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0, ARG1];
+  print STDERR "Resolver Response:\n";
+  print Data::Dumper->Dump([$creation_args,$called_args],[qw($creation_args $called_args)]);
   # event listening for resolver postbacks - one event per resolver
   # stores status in _HEAP per socket/port pair and resolver friendly name
   # ARGS: resolver, hit?, record_ref
@@ -74,28 +78,29 @@ sub _stop {#{{{
 
 sub _start {#{{{
   my ($self, $kernel, $heap, $session, %args) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0.. $#_];
-  print "Session ", $session->ID, " has started.\n";
-  $kernel->alias_set("greysink");
+  $kernel->alias_set($args{alias});
+  printf "Greysink Session %d (%s) has started.\n", $session->ID, $args{alias};
 
   # save off our "child" sink aliases
   $heap->{greysink}->{sinks} = $args{sink_aliases};
 
   my $dns_server = POE::Component::Server::DNS->spawn(
+    alias => $args{server_alias},
     map { defined($args{$_}) ? ($_ , $args{$_}) : () } qw(port address resolver_opts),
-    alias => 'dns_server',
   );
+  $heap->{greysink}->{dns_server} = $dns_server;
 
-  # set up DNS listener
-  $kernel->post( 'dns_server', 'add_handler', {
-      session => 'greysink',
+  # set up DNS listener handler
+  $kernel->post(  $args{server_alias}, 'add_handler', {
+      session => $args{alias},
       event => 'query_handler',
       label => 'ZA_WARUDO',
       match => '.',
   });
 
-  my $postback = $session->postback("complete","dns_connection_socketpair_maybe");
-  my ($qname,$qclass,$qtype) = qw(foobar.com IN A);
-  $kernel->yield('step_a',$qname,$qclass,$qtype,$postback);
+  #my $postback = $session->postback("complete","dns_connection_socketpair_maybe");
+  #my ($qname,$qclass,$qtype) = qw(foobar.com IN A);
+  #$kernel->yield('step_a',$qname,$qclass,$qtype,$postback);
 }#}}}
 
 sub complete {#{{{
