@@ -21,11 +21,9 @@ sub spawn {
         ],
 	object_states => [
 	  $self => [ qw(_start _stop
-                        query_handler resolver_response
-
-                        complete step_a step_b step_c
+                        query_handler sinkhole_response reply_handler
                    ) ],
-	  $self => { _child => 'default' },
+	  $self => { _child => 'default', _parent => 'default' },
 	],
   )->ID();
   return $self;
@@ -39,44 +37,47 @@ sub query_handler {
   my ($self, $kernel, $heap, $session, $qname,$qclass,$qtype,$callback,$origin) = @_[OBJECT, KERNEL, HEAP, SESSION,ARG0..ARG4];
   my ($rcode, @ans, @auth, @add);
 
+  # hashref accessible to all sinkhole "lookup" events - for cross-communication
+  # that they can "fall through" early when a sinkhole has "answered" a request 
+  my $oob_state = { handled => 0 };
+
   # send queries to sinkholes
   foreach my $sink_name (@{$heap->{greysink}->{sinks}}) {
     printf STDERR "Handler query_handler: Sink: %s, QO: %s QC: %s QT: %s QN: %s\n",$sink_name, $origin,$qclass,$qtype,$qname;
     # give the sinkhole a method to record its response, and tie it to the origin
-    my $postback = $session->postback("resolver_response",$origin);
+    my $postback = $session->postback("sinkhole_response",$callback);
     # ask the sink to do a lookup, w/ the query + postback to respond through
-    $kernel->post($sink_name,"lookup",$postback,$qname,$qclass,$qtype);
+    $kernel->post($sink_name,"lookup",$postback,$qname,$qclass,$qtype,$oob_state);
   }
-
-  ### XXX FIXME TEMPORARY CODE BE HERE # {{{
-
-  if ($qtype eq "A") {
-    my ($ttl, $rdata) = (3600, "10.1.2.3");
-    push @ans, Net::DNS::RR->new("$qname $ttl $qclass $qtype $rdata");
-    $rcode = "NOERROR";
-  } else {
-    $rcode = "NXDOMAIN";
-  }
-
-  $callback->($rcode, \@ans, \@auth, \@add, { aa => 1 });
-  ### XXX FIXME TEMPORARY CODE BE HERE # }}}
+  undef;
 }
 
-sub resolver_response {
+# this takes care of censoring data that shouldn't be in a response (e.g. recursive queries)
+sub reply_handler {
+  undef;
+}
+
+sub sinkhole_response {
   my ($self, $kernel, $heap, $session, $creation_args, $called_args) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0, ARG1];
-  print STDERR "Resolver Response:\n";
-  print Data::Dumper->Dump([$creation_args,$called_args],[qw($creation_args $called_args)]);
+  my ($callback) = @$creation_args;
+  my ($rcode,$ans,$auth,$add,$header) = @$called_args;
+
+  #print STDERR "Resolver Response:\n";
+  #print Data::Dumper->Dump([$callback],[qw($callback)]);
+  #print Data::Dumper->Dump([$rcode,$ans,$auth,$add,$header],[qw($rcode $ans $auth $add $header)]);
+  #$session->post("reply_handler"
+  $callback->($rcode, $ans, $auth, $add, { aa => 1 });
   # event listening for resolver postbacks - one event per resolver
   # stores status in _HEAP per socket/port pair and resolver friendly name
   # ARGS: resolver, hit?, record_ref
   # ... this needs to know how many/what names there are of resolvers.
 }
 
-sub _stop {#{{{
+sub _stop { # {{{
   print "Session ", $_[SESSION]->ID, " has stopped.\n";
-}#}}}
+} # }}}
 
-sub _start {#{{{
+sub _start {# {{{
   my ($self, $kernel, $heap, $session, %args) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0.. $#_];
   $kernel->alias_set($args{alias});
   printf "Greysink Session %d (%s) has started.\n", $session->ID, $args{alias};
@@ -86,6 +87,7 @@ sub _start {#{{{
 
   my $dns_server = POE::Component::Server::DNS->spawn(
     alias => $args{server_alias},
+    no_clients => 1, # don't recurse, don't forward.
     map { defined($args{$_}) ? ($_ , $args{$_}) : () } qw(port address resolver_opts),
   );
   $heap->{greysink}->{dns_server} = $dns_server;
@@ -97,45 +99,5 @@ sub _start {#{{{
       label => 'ZA_WARUDO',
       match => '.',
   });
-
-  #my $postback = $session->postback("complete","dns_connection_socketpair_maybe");
-  #my ($qname,$qclass,$qtype) = qw(foobar.com IN A);
-  #$kernel->yield('step_a',$qname,$qclass,$qtype,$postback);
-}#}}}
-
-sub complete {#{{{
-  my ($self, $kernel,$heap,$session,$passthru,$passback) = @_[OBJECT, KERNEL,HEAP, SESSION,ARG0,ARG1];
-  print Data::Dumper->Dump([$passthru,$passback],[qw($passthru $passback)]);
-}#}}}
-
-sub step_a {#{{{
-  my ($self,$kernel,$heap,$session,$qname,$qclass,$qtype,$postback) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0..ARG3];
-  if (rand()*10%2==0) {
-    print "STEP A: Hit, we stop here.\n";
-    $postback->($qname,$qclass,$qtype,"postback_arg3");
-  } else {
-    print "STEP A: Miss, we move down the chain\n";
-    $kernel->yield('step_b',$qname,$qclass,$qtype,$postback);
-  }
-}#}}}
-
-sub step_b {#{{{
-  my ($self,$kernel,$heap,$session,$qname,$qclass,$qtype,$postback) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0..ARG3];
-  if (rand()*10%2==0) {
-    print "STEP B: Hit, we stop here.\n";
-    $postback->($qname,$qclass,$qtype,"postback_arg3");
-  } else {
-    print "STEP B: Miss, we move down the chain\n";
-    $kernel->yield('step_c',$qname,$qclass,$qtype,$postback);
-  }
-}#}}}
-
-sub step_c {#{{{
-  my ($self,$kernel,$heap,$session,$qname,$qclass,$qtype,$postback) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0..ARG3];
-  print "STEP C: we stop here.\n";
-  $postback->($qname,$qclass,$qtype,"postback_arg3");
-}#}}}
-
-
-
+} # }}}
 1;

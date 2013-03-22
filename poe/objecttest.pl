@@ -22,7 +22,7 @@ my $named = POE::Component::Client::DNS->spawn(
 
 # whitelist sinkhole session - uses above resolver
 my $whitelist_sink_session = POE::Component::Greysink::Sink->spawn(
-  resolver => "named", # tell the sink the resolver session alias
+  resolver => $named, # tell the sink the resolver session alias
   alias => "whitelist", # what our alias is for the Greysink server to know us by
   list => "whitelist.txt", # where to get our list of zones that are spoofed
   inotify => "inotify", # tell sink where our inotify session is
@@ -30,7 +30,7 @@ my $whitelist_sink_session = POE::Component::Greysink::Sink->spawn(
 
 # blacklist sinkhole session - uses above resolver
 my $blacklist_sink_session = POE::Component::Greysink::Sink->spawn(
-  resolver => "named", # tell the sink the resolver session alias
+  resolver => $named, # tell the sink the resolver session alias
   alias => "blacklist", # what our alias is for the Greysink server to know us by
   list => "blacklist.txt", # where to get our list of zones that are spoofed
   inotify => "inotify", # tell sink where our inotify session is
@@ -50,7 +50,7 @@ my $server = POE::Component::Greysink::Handler->spawn(
     recursive => 1, # do we fall through to recursive resolution?
     learn => 1, # do we learn new whitelist/blacklist based on recursion?
     sink_aliases => [ qw(whitelist blacklist) ],
-    resolver => "named", # tell the server where the resolver is for recursion
+    resolver => $named, # tell the server where the resolver is for recursion
     port => 5252,
     address => "0.0.0.0",
     alias => 'greysink_handler',
