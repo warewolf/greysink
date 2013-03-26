@@ -21,7 +21,7 @@ sub spawn {
         ],
 	object_states => [
 	  $self => [ qw(_start _stop
-                        query_handler sinkhole_response reply_handler
+                        query_handler sinkhole_response reply_handler censor_authority
                    ) ],
 	  $self => { _child => 'default', _parent => 'default' },
 	],
@@ -52,6 +52,10 @@ sub query_handler {
   undef;
 }
 
+sub censor_authority {
+  my ($self, $kernel, $heap, $session, $authority_ref, $additional_ref) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0, ARG1];
+}
+
 # this takes care of censoring data that shouldn't be in a response (e.g. recursive queries)
 sub reply_handler {
   undef;
@@ -62,11 +66,12 @@ sub sinkhole_response {
   my ($callback) = @$creation_args;
   my ($rcode,$ans,$auth,$add,$header) = @$called_args;
 
-  #print STDERR "Resolver Response:\n";
-  #print Data::Dumper->Dump([$callback],[qw($callback)]);
-  #print Data::Dumper->Dump([$rcode,$ans,$auth,$add,$header],[qw($rcode $ans $auth $add $header)]);
-  #$session->post("reply_handler"
+  # here we need to loop through our sinkholes and ask if they need to censor data.
+  # query -> sinkhole(s) -> response data -> check censor(s) -> censored -> redo query from top
+
+  # XXX FIXME - tempoary code, this prevents "learning"
   $callback->($rcode, $ans, $auth, $add, { aa => 1 });
+  # XXX FIXME
   # event listening for resolver postbacks - one event per resolver
   # stores status in _HEAP per socket/port pair and resolver friendly name
   # ARGS: resolver, hit?, record_ref
