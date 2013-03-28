@@ -4,7 +4,7 @@ use strict;
 use warnings;
 use lib qw(lib);
 sub POE::Kernel::ASSERT_DEFAULT () { 1 }
-use POE qw(Component::Greysink::Handler Component::Greysink::Sink Component::Client::DNS Component::Server::DNS);
+use POE qw(Component::Greysink::Handler Component::Greysink::Sink Component::Greysink::Whitelist Component::Client::DNS Component::Server::DNS);
 use Data::Dumper;
 use POEx::Inotify;
 use Linux::Inotify2;
@@ -18,10 +18,11 @@ POEx::Inotify->spawn( alias=>'inotify' );
 # resolver used globally
 my $named = POE::Component::Client::DNS->spawn(
   Alias => "named"
+  # resolvers => [ 1.2.3.4, 4.5.6.7 ];
 );
 
 # whitelist sinkhole session - uses above resolver
-my $whitelist_sink_session = POE::Component::Greysink::Sink->spawn(
+my $whitelist_sink_session = POE::Component::Greysink::Whitelist->spawn(
   resolver => $named, # tell the sink the resolver session alias
   alias => "whitelist", # what our alias is for the Greysink server to know us by
   list => "whitelist.txt", # where to get our list of zones that are spoofed
