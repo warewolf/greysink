@@ -22,7 +22,7 @@ sub spawn {
         ],
 	object_states => [
 	  $self => [ qw(_start _stop
-                        query_handler sinkhole_response censor_authority recursive_lookup async_recursive_response
+                        query_handler sinkhole_response censor_authority recursive_lookup async_recursive_response refuse_lookup
                    ) ],
 	  $self => { _child => 'default', _parent => 'default' },
 	],
@@ -51,11 +51,15 @@ sub query_handler {
     $kernel->post($sink_name,"generate_response",$postback,$qname,$qclass,$qtype,$oob_state);
   }
   # do recursion if desired
-  $kernel->yield("recursive_lookup",$postback,$qname,$qclass,$qtype,$oob_state) if ($heap->{recursive});
+  if ($heap->{recursive}) {
+    $kernel->yield("recursive_lookup",$postback,$qname,$qclass,$qtype,$oob_state);
+  } else {
+    $kernel->yield("refuse_lookup",$callback,$qname,$qclass,$qtype,$oob_state)
+  }
   undef;
 }
 
-sub recursive_lookup {
+sub recursive_lookup { # {{{
   my ($self, $kernel, $heap, $session, $response_postback,$qname,$qclass,$qtype,$oob_state) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0..ARG5];
 
   print STDERR "Performing recursive lookup\n" if (-t);
@@ -77,8 +81,18 @@ sub recursive_lookup {
       $kernel->yield("async_recursive_response",$response);
     }
   return undef;
-}
+} # }}}
 
+sub refuse_lookup { # {{{
+  my ($self, $kernel, $heap, $session, $response_postback,$qname,$qclass,$qtype,$oob_state) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0..ARG5];
+
+  print STDERR "Refusing recursive lookup\n" if (-t);
+  $oob_state->{handled}++;
+
+  my ( $rcode, @answer, @authority, @additional, $headermask );
+  $response_postback->("REFUSED");
+  return undef;
+} # }}}
 sub async_recursive_response {
   my ($self, $kernel, $heap, $session, $response) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0];
   my ( $rcode, @answer, @authority, @additional, $headermask );
