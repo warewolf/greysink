@@ -15,7 +15,6 @@ sub spawn {#{{{
   my $class = shift;
   my %args = @_;
   my $self = bless { }, $class;
-  print "Sink spawn args: \n",Data::Dumper->Dump([\%args],[qw($args)]);
 
   $self->{session_id} = POE::Session->create(
         args => [
@@ -54,8 +53,7 @@ sub learn {#{{{
 
 sub list_change {#{{{
   my ($self, $kernel, $heap, $session, $e, $args) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0, ARG1];
-  print "File ready: ", $e->fullname, "\n";
-  print Data::Dumper->Dump([$args],[qw($args)]);
+  print STDERR "File ready: ", $e->fullname, "\n" if (-t);
   $kernel->call($session,"load_data");
 }#}}}
 
@@ -67,7 +65,7 @@ sub load_data {#{{{
   $heap->{trie} = Tree::Trie->new({deepsearch=> "exact"});
   open(my $list_fh,"<",$heap->{list}) or die "Couldn't open list file $heap->{list}";
 
-  if (defined($heap->{records})) {
+  if (defined($heap->{records})) {#{{{
     # we have RRs for queries that match our Trie
     while (<$list_fh>) {
       chomp $_;
@@ -75,14 +73,15 @@ sub load_data {#{{{
       $heap->{trie}->add_data(rev($_),$heap->{records});
       $heap->{trie}->add_data(rev("*.$_"),$heap->{records});
     }
-  } else {
+  }#}}}
+  else {#{{{
     # we don't have RRs for queries that match our Trie.  Therefore
     while (<$list_fh>) {
       chomp $_;
       printf STDERR "%s adding %s\n",$heap->{alias},$_;
       $heap->{trie}->add(rev($_));
     }
-  }
+  }#}}}
   close $list_fh;
 }#}}}
 
@@ -90,13 +89,13 @@ sub _start {#{{{
   my ($self, $kernel, $heap, $session, %args ) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0..$#_];
 
   $kernel->alias_set($args{alias});
-  print "Sink Session ($args{alias}) ", $session->ID, " has started.\n";
+  print STDERR "Sink Session ($args{alias}) ", $session->ID, " has started.\n" if (-t);
   $poe_kernel->sig( DIE => 'sig_DIE' );
 
   # save off what list file we're watching for load_data
   $heap->{list} = $args{list};
 
-  print "Setting up inotify of $args{list} in $args{inotify} session\n";
+  print STDERR "Setting up inotify of $args{list} in $args{inotify} session\n" if (-t);
   $kernel->post( $args{inotify} => monitor => {
 	      path => $args{list},
 	      mask  => IN_CLOSE_WRITE,
@@ -131,7 +130,7 @@ sub sig_DIE {#{{{
 }#}}}
 
 sub _stop {#{{{
-  print "Session ", $_[SESSION]->ID, " has stopped.\n";
+  print STDERR "Session ", $_[SESSION]->ID, " has stopped.\n";
 }#}}}
 
 sub generate_response {#{{{
@@ -151,7 +150,8 @@ sub generate_response {#{{{
   # look for a hit in our Trie
   my $zone = first { $heap->{trie}->lookup( rev lc($_) ) } wildcardsearch($qname);
 
-  if ($zone) {# we found a record in our trie
+  if ($zone) { #{{{
+    # we found a record in our trie
     printf STDERR "HIT: %s matches %s is in sink %s\n", $qname, $zone,$heap->{alias} if (-t);
     $oob_state->{handled}++;
 
@@ -159,7 +159,7 @@ sub generate_response {#{{{
     my $record = $heap->{trie}->lookup_data( rev lc($zone) );
 
     # check if the RR type asked for exists
-    if ( exists ( $record->{$qtype} ) ) {
+    if ( exists ( $record->{$qtype} ) ) {#{{{
 
       # make our sinkholed response look like the question
       my $answer_rr = $record->{$qtype};
@@ -193,13 +193,15 @@ sub generate_response {#{{{
 
       $response_postback->($rcode, \@answer, \@authority, \@additional, { aa => 1 });
 
-    } else {
+    }#}}}
+    else {#{{{
       printf("Sink %s hit for domain %s, but RR type %s %s not found. Return NXDOMAIN.\n",$alias,$qname,$qclass,$qtype) if (-t);
       $response_postback->("NXDOMAIN", \@answer, \@authority, \@additional, { aa => 1 });
-    }
-  } else {
-    printf("Zone %s not found in sink %s, do nothing.\n",$qname,$alias) if (-t);
-  }
+    }#}}}
+  }#}}}
+  else {#{{{
+    printf STDERR ("Zone %s not found in sink %s, do nothing.\n",$qname,$alias) if (-t);
+  }#}}}
 }
 
 # wildcard-ify a request to see if something shorter for a wildcard exists.

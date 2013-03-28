@@ -1,17 +1,15 @@
 # vim: foldmethod=marker ts=4 sw=2 commentstring=\ #\ %s
 package POE::Component::Greysink::Handler;
-use POE qw(Component::Server::DNS);
+use POE qw(Component::Server::DNS Component::Greysink::Sink Component::Greysink::Whitelist Component::Client::DNS);
 use strict;
 use warnings;
-use Data::Dumper;
-
 
 # Spawn a new PoCo::Greysink session.  This basically is a
 # constructor, but it isn't named "new" because it doesn't create a
 # usable object.  Instead, it spawns the object off as a session.
 
 # this will set up the DNS listener session, sending events back to the Greysink::Handler session.
-sub spawn {
+sub spawn { # {{{
   my $class = shift;
   my %args = @_;
   my $self = bless { }, $class;
@@ -28,13 +26,14 @@ sub spawn {
 	],
   )->ID();
   return $self;
-}
+} # }}}
 
-sub default {
+sub default { # {{{
   my ($self, $kernel, $heap, $session, $source, $dest) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0, ARG1];
-}
+  return undef;
+} # }}}
 
-sub query_handler {
+sub query_handler { # {{{
   my ($self, $kernel, $heap, $session, $qname,$qclass,$qtype,$callback,$origin) = @_[OBJECT, KERNEL, HEAP, SESSION,ARG0..ARG4];
   my ($rcode, @ans, @auth, @add);
 
@@ -44,25 +43,24 @@ sub query_handler {
   my $postback = $session->postback("sinkhole_response",$callback);
 
   # send queries to sinkholes
-  foreach my $sink_name (@{$heap->{greysink}->{sinks}}) {
-    printf STDERR "Handler query_handler: Sink: %s, QO: %s QC: %s QT: %s QN: %s\n",$sink_name, $origin,$qclass,$qtype,$qname;
+  foreach my $sink_name (@{$heap->{greysink}->{sinks}}) { # {{{
     # give the sinkhole a method to record its response, and tie it to the origin
     # ask the sink to do a lookup, w/ the query + postback to respond through
     $kernel->post($sink_name,"generate_response",$postback,$qname,$qclass,$qtype,$oob_state);
-  }
+  } # }}}
+
   # do recursion if desired
-  if ($heap->{recursive}) {
+  if ($heap->{recursive}) { # {{{
     $kernel->yield("recursive_lookup",$postback,$qname,$qclass,$qtype,$oob_state);
   } else {
     $kernel->yield("refuse_lookup",$callback,$qname,$qclass,$qtype,$oob_state)
-  }
-  undef;
-}
+  } # }}}
+  return undef;
+} # }}}
 
 sub recursive_lookup { # {{{
   my ($self, $kernel, $heap, $session, $response_postback,$qname,$qclass,$qtype,$oob_state) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0..ARG5];
 
-  print STDERR "Performing recursive lookup\n" if (-t);
   if ($oob_state->{handled}) {
     printf STDERR "This request was handled by a previous sinkhole handler\n" if (-t);
     return undef;
@@ -93,13 +91,20 @@ sub refuse_lookup { # {{{
   $response_postback->("REFUSED");
   return undef;
 } # }}}
-sub async_recursive_response {
+
+sub async_recursive_response { # {{{
   my ($self, $kernel, $heap, $session, $response) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0];
   my ( $rcode, @answer, @authority, @additional, $headermask );
 
   my $response_postback = $response->{context};
   my $answer = $response->{response};
-  my $error = $response->{error}; # XXX FIXME RGH: CHECK FOR ERRORS!!! XXX FIXME
+  my $error = $response->{error};
+
+  if ($error ne 'NOERROR') { # {{{
+    warn "Recursive error: $error";
+    $response_postback->("SERVFAIL");
+    return undef;
+  } # }}}
 
   # clone the response$
   $rcode        = $answer->header->rcode;
@@ -109,18 +114,16 @@ sub async_recursive_response {
 
   # the response postback gets whitewashed, so it's ok to pass auth/add through.
   $response_postback->($rcode, \@answer, \@authority, \@additional, { aa => 1 });
+  return undef;
+} # }}}
 
-}
-
-
-sub censor_authority {
+sub censor_authority { # {{{
   my ($self, $kernel, $heap, $session, $callback, $rcode, $ans, $auth, $add,$headermask) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0..ARG5];
 
   # flag variable to see if we need to redo the query
   my $redo = 0;
-  print Data::Dumper->Dump([$ans],[qw($answer)]);
 
-  AUTH_LOOP: foreach my $record (@$auth) {
+  AUTH_LOOP: foreach my $record (@$auth) { # {{{
 
     my @record_fields;
     if ($record->type() eq 'NS')
@@ -130,51 +133,50 @@ sub censor_authority {
 
     my ($zone,$nameserver) = map { $record->$_() } @record_fields;
 
-	foreach my $sink_name (@{$heap->{greysink}->{sinks}}) {
+	foreach my $sink_name (@{$heap->{greysink}->{sinks}}) { # {{{
       my $sinkholed_ns = $kernel->call($sink_name,"lookup",$nameserver);
       my $sinkholed_zone = $kernel->call($sink_name,"lookup",$zone);
 
-      if ($sinkholed_ns) {
+      if ($sinkholed_ns) { # {{{
         # nameserver is sinkholed
-        if (! $sinkholed_zone) {
+        if (! $sinkholed_zone) { # {{{
           # nameserver is sinkholed, but zone is NOT sinkholed.  Learn & sinkhole.
 		  printf STDERR "NS %s is sinkholed, but zone %s is not.  Learn and redo\n",$nameserver,$zone;
 		  $kernel->call($sink_name,"learn",$zone);
 		  $kernel->call($sink_name,"learn","*.$zone");
           $redo++;
-        }
-		else {
+        } # }}}
+		else { # {{{
 		  # nameserver is sinkholed, so is zone.  All good, do nothing
-        }
-      }
-	  else {
+        } # }}}
+      } # }}}
+	  else { # {{{
         # nameserver is NOT sinkholed
-        if ( $sinkholed_zone) {
+        if ( $sinkholed_zone) { # {{{
           # nameserver is NOT sinkholed, but zone IS sinkholed
 		  # kill the AUTHORITY records
 		  map { $_ = undef } @$auth;
 		  # kill the ADDITIONAL records
 		  map { $_ = undef } @$add;
-        }
-        else {
+        } # }}}
+        else { # {{{
 		  # nameserver is NOT sinkholed, zone is NOT sinkholed.
-        }
-      }
-    }# 
-  }
-    continue {
-      if ($redo) {
+        } # }}}
+      } # }}}
+    }#  # }}}
+  } # }}}
+    continue { # {{{
+      if ($redo) { # {{{
 		print STDERR "Redo loop hit, breaking out and repeating.\n" if (-t);
-		print Data::Dumper->Dump([$ans],[qw($ans)]);
         $kernel->call($session,"query_handler", (map { $ans->[0]->$_() } qw(name class type)), $callback,"0.0.0.0");
         last AUTH_LOOP;
-      }
-    }
+      } # }}}
+    } # }}}
     # if we're here, we had no problems.
     $callback->("NOERROR", $ans, $auth, $add, { aa => 1 }) if (!$redo);
-}
+} # }}}
 
-sub sinkhole_response {
+sub sinkhole_response { # {{{
   my ($self, $kernel, $heap, $session, $creation_args, $called_args) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0, ARG1];
   my ($callback) = @$creation_args;
   my ($rcode,$ans,$auth,$add,$header) = @$called_args;
@@ -190,13 +192,13 @@ sub sinkhole_response {
   # stores status in _HEAP per socket/port pair and resolver friendly name
   # ARGS: resolver, hit?, record_ref
   # ... this needs to know how many/what names there are of resolvers.
-}
+} # }}}
 
-sub _stop {
+sub _stop { # {{{
   print "Session ", $_[SESSION]->ID, " has stopped.\n";
-}
+} # }}}
 
-sub _start {# 
+sub _start { # {{{
   my ($self, $kernel, $heap, $session, %args) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0.. $#_];
   $kernel->alias_set($args{alias});
   printf "Greysink Session %d (%s) has started.\n", $session->ID, $args{alias};
@@ -205,11 +207,11 @@ sub _start {#
   $heap->{greysink}->{sinks} = $args{sink_aliases};
 
   $heap->{resolver} = $args{resolver};
-  my $dns_server = POE::Component::Server::DNS->spawn(
+  my $dns_server = POE::Component::Server::DNS->spawn( # {{{
     alias => $args{server_alias},
     no_clients => 1, # don't recurse, don't forward.
     map { defined($args{$_}) ? ($_ , $args{$_}) : () } qw(port address resolver_opts),
-  );
+  ); # }}}
   $heap->{greysink}->{dns_server} = $dns_server;
   $heap->{recursive} = $args{recursive};
 
@@ -220,5 +222,6 @@ sub _start {#
       label => 'ZA_WARUDO',
       match => '.',
   });
-}
+} # }}}
+
 1;

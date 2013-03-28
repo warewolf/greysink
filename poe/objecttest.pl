@@ -3,13 +3,12 @@
 use strict;
 use warnings;
 use lib qw(lib);
-sub POE::Kernel::ASSERT_DEFAULT () { 1 }
-use POE qw(Component::Greysink::Handler Component::Greysink::Sink Component::Greysink::Whitelist Component::Client::DNS Component::Server::DNS);
+#sub POE::Kernel::ASSERT_DEFAULT () { 1 }
+use POE qw(Component::Greysink::Handler);
 use Data::Dumper;
 use POEx::Inotify;
 use Linux::Inotify2;
 use Carp::Always;
-
 
 # inotify handler used globally - monitor requests get sent back to sessions that requested them
 # which means the sink sessions have to request them.
@@ -35,12 +34,12 @@ my $blacklist_sink_session = POE::Component::Greysink::Sink->spawn(
   alias => "blacklist", # what our alias is for the Greysink server to know us by
   list => "blacklist.txt", # where to get our list of zones that are spoofed
   inotify => "inotify", # tell sink where our inotify session is
-  authority => {
+  authority => { # these are the authority records that will be served in responses
     A => '* 86400 IN A 192.168.100.100',
     NS => '* 86400 IN NS ns.sinkhole.example.com',
     SOA => '* 86400 IN SOA ns.sinkhole.example.com. cert.example.com.  ( 42 28800 14400 3600000 86400)',
   },
-  records => {
+  records => { # these are the records that will be filled in as answers to lookups
     A  => '* 86400 IN A 10.1.2.3',
     NS => '* 86400 IN NS ns.sinkhole.example.com',
     SOA => '* 86400 IN SOA ns.sinkhole.example.com. cert.example.com.  ( 42 28800 14400 3600000 86400)',
