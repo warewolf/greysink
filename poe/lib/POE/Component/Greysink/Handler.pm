@@ -168,7 +168,7 @@ sub censor_authority { # {{{
     continue { # {{{
       if ($redo) { # {{{
 		print STDERR "Redo loop hit, breaking out and repeating.\n" if (-t);
-        $kernel->call($session,"query_handler", (map { $ans->[0]->$_() } qw(name class type)), $callback,"0.0.0.0");
+        $kernel->post($session,"query_handler", (map { $ans->[0]->$_() } qw(name class type)), $callback,"0.0.0.0");
         last AUTH_LOOP;
       } # }}}
     } # }}}
@@ -184,14 +184,7 @@ sub sinkhole_response { # {{{
   # here we need to loop through our sinkholes and ask if they need to censor data.
   # query -> sinkhole(s) -> response data -> check censor(s) -> censored -> handler tells sink to learn -> redo query from top
 
-  # XXX FIXME - tempoary code, this prevents "learning"
   $kernel->yield("censor_authority",$callback,$rcode, $ans, $auth, $add, { aa => 1 });
-  #$callback->($rcode, $ans, $auth, $add, { aa => 1 });
-  # XXX FIXME
-  # event listening for resolver postbacks - one event per resolver
-  # stores status in _HEAP per socket/port pair and resolver friendly name
-  # ARGS: resolver, hit?, record_ref
-  # ... this needs to know how many/what names there are of resolvers.
 } # }}}
 
 sub _stop { # {{{

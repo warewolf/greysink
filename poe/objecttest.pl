@@ -5,7 +5,7 @@ use warnings;
 use lib qw(lib);
 #sub POE::Kernel::ASSERT_DEFAULT () { 1 }
 use POE qw(Component::Greysink::Handler);
-use Data::Dumper;
+#use Data::Dumper;
 use POEx::Inotify;
 use Linux::Inotify2;
 use Carp::Always;
@@ -22,7 +22,7 @@ my $named = POE::Component::Client::DNS->spawn(
 
 # whitelist sinkhole session - uses above resolver
 my $whitelist_sink_session = POE::Component::Greysink::Whitelist->spawn(
-  resolver => $named, # tell the sink the resolver session alias
+  resolver => $named, # give the sink access to the resolver object
   alias => "whitelist", # what our alias is for the Greysink server to know us by
   list => "whitelist.txt", # where to get our list of zones that are spoofed
   inotify => "inotify", # tell sink where our inotify session is
@@ -30,7 +30,7 @@ my $whitelist_sink_session = POE::Component::Greysink::Whitelist->spawn(
 
 # blacklist sinkhole session - uses above resolver
 my $blacklist_sink_session = POE::Component::Greysink::Sink->spawn(
-  resolver => $named, # tell the sink the resolver session alias
+  resolver => $named, # give the sink access to the resolver object
   alias => "blacklist", # what our alias is for the Greysink server to know us by
   list => "blacklist.txt", # where to get our list of zones that are spoofed
   inotify => "inotify", # tell sink where our inotify session is
@@ -48,13 +48,13 @@ my $blacklist_sink_session = POE::Component::Greysink::Sink->spawn(
 
 my $server = POE::Component::Greysink::Handler->spawn(
     recursive => 1, # do we fall through to recursive resolution?
-    learn => 1, # do we learn new whitelist/blacklist based on recursion?
+    learn => 1, # do we automatically add zones from listed nameservers based on recursion?
     sink_aliases => [ qw(whitelist blacklist) ],
     resolver => $named, # tell the server where the resolver is for recursion
-    port => 5252,
-    address => "0.0.0.0",
-    alias => 'greysink_handler',
-    server_alias => 'greysink_server',
+    port => 5252, # tcp/udp port to bind to
+    address => "0.0.0.0", # ip to bind to
+    alias => 'greysink_handler', # Greysink::Handler alias
+    server_alias => 'greysink_server', # Component::Server::DNS alias
 );
 
 POE::Kernel->run();

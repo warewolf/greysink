@@ -69,9 +69,25 @@ sub load_data {#{{{
     # we have RRs for queries that match our Trie
     while (<$list_fh>) {
       chomp $_;
+
+      # skip comments
+      next if ($_ =~ m/^#/);
+
+      # remove comments from end of line
+      $_ =~ s/\s*#.*//;
+
+      # remove whitespace
+      $_ =~ s/^\s+//; $_ =~ s/\s+$//;
+
+      # skip lines that are empty
+      next unless length($_);
+
+      # remove invalid characters
+      $_ =~ s/[^_.*a-z0-9]//i;
+
       printf STDERR "%s adding %s with data\n",$heap->{alias},$_ if (-t);
       $heap->{trie}->add_data(rev($_),$heap->{records});
-      $heap->{trie}->add_data(rev("*.$_"),$heap->{records});
+      $heap->{trie}->add_data(rev("*.$_"),$heap->{records}) unless $_ =~ m/\*/;
     }
   }#}}}
   else {#{{{
