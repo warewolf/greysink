@@ -97,8 +97,8 @@ sub load_data {#{{{
       $_ =~ s/[^_.*a-z0-9]//i;
 
       printf STDERR "%s adding %s with data\n",$heap->{alias},$_ if (-t);
-      $heap->{new_trie}->add_data(rev($_),$heap->{records});
-      $heap->{new_trie}->add_data(rev("*.$_"),$heap->{records}) unless $_ =~ m/\*/;
+      $heap->{new_trie}->add(rev($_));
+      $heap->{new_trie}->add(rev("*.$_")) unless $_ =~ m/\*/;
     }
   }#}}}
   else {#{{{
