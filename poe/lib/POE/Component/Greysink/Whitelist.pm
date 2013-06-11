@@ -8,6 +8,8 @@ use POEx::Inotify;
 use Linux::Inotify2;
 use Tree::Trie;
 use List::Util qw(first);
+use List::Compare;
+use Net::RNDC;
 
 sub rev ($) { scalar reverse $_[0]; }
 
@@ -15,15 +17,14 @@ sub spawn {#{{{
   my $class = shift;
   my %args = @_;
   my $self = bless { }, $class;
-  print STDERR "Sink spawn args: \n",Data::Dumper->Dump([\%args],[qw($args)]);
 
   $self->{session_id} = POE::Session->create(
         args => [
-          map { defined($args{$_}) ? ( $_, $args{$_} ) : () } qw(resolver alias list inotify),
+          map { defined($args{$_}) ? ( $_, $args{$_} ) : () } qw(resolver alias list inotify rndc_key),
          ],
         object_states => [
           $self => [ qw(_start _stop generate_response list_change lookup learn sig_DIE load_data async_response) ],
-	  $self => { _child => 'default' },
+          $self => { _child => 'default' },
         ],
         heap => { alias => $args{alias} },
   )->ID();
@@ -46,24 +47,33 @@ sub lookup {#{{{
 # clone an existing Trie record to another one
 sub learn {#{{{
   my ($self, $kernel, $heap, $session, $dest_zone, $source_zone) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0, ARG1];
-  my $records = $heap->{trie}->lookup_data( rev($source_zone) );
   printf STDERR "Info: Learning new zone %s to sinkhole %s mimicing %s\n",$dest_zone,$source_zone,$heap->{alias} if (-t);
-  $heap->{trie}->add_data( rev($dest_zone), $records );
+  $heap->{trie}->add( rev($dest_zone));
+  my $return = $heap->{rndc}->do(sprintf("flushname %s",$dest_zone));
+  warn sprintf("flushname %s failed, %s",$dest_zone,$heap->{rndc}->error) if (!$return);
   return undef;
 }#}}}
 
 sub list_change {#{{{
   my ($self, $kernel, $heap, $session, $e, $args) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0, ARG1];
   print STDERR "File ready: ", $e->fullname, "\n";
-  $kernel->call($session,"load_data");
+  $kernel->call($session,"load_data","update");
 }#}}}
 
 sub load_data {#{{{
-  my ($self, $kernel, $heap, $session, %args ) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0..$#_];
+  my ($self, $kernel, $heap, $session, $mode ) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0];
 
   printf STDERR "Sink %s loading domains from %s\n",$heap->{alias},$heap->{list} if (-t);
+
+  $kernel->post( $heap->{inotify} => monitor => {#{{{
+             path => $heap->{list},
+             mask  => IN_CLOSE_WRITE|IN_MOVE|IN_DELETE_SELF,
+             event => 'list_change',
+             args => [ "argument_on_notification" ],
+          } );#}}}
+
   # set up Trie
-  $heap->{trie} = Tree::Trie->new({deepsearch=> "exact"});
+  $heap->{new_trie} = Tree::Trie->new({deepsearch=> "exact"});
   open(my $list_fh,"<",$heap->{list}) or die "Couldn't open list file $heap->{list}";
 
   if (defined($heap->{records})) {#{{{
@@ -87,17 +97,36 @@ sub load_data {#{{{
       $_ =~ s/[^_.*a-z0-9]//i;
 
       printf STDERR "%s adding %s with data\n",$heap->{alias},$_ if (-t);
-      $heap->{trie}->add_data(rev($_),$heap->{records});
+      $heap->{new_trie}->add_data(rev($_),$heap->{records});
+      $heap->{new_trie}->add_data(rev("*.$_"),$heap->{records}) unless $_ =~ m/\*/;
     }
   }#}}}
   else {#{{{
-    # we don't have RRs for queries that match our Trie.  Therefore
+    # we don't have RRs for queries that match our Trie.  Therefore just add.
     while (<$list_fh>) {#{{{
       chomp $_;
-      printf STDERR "%s adding %s\n",$heap->{alias},$_;
-      $heap->{trie}->add(rev($_));
+      printf STDERR "%s adding %s\n",$heap->{alias},$_ if (-t);
+      $heap->{new_trie}->add(rev($_));
+      $heap->{new_trie}->add(rev("*.$_")) unless $_ =~ m/\*/;
     }#}}}
   }#}}}
+
+  if ($mode eq "update") {
+    # compare old list to new list and flush those names from the cache
+    my @old = $heap->{trie}->lookup("");
+    my @new = $heap->{new_trie}->lookup("");
+    my $lc = List::Compare->new('-u','-a',\@old,\@new);
+    my @removed = $lc->get_Lonly();
+    my @added = $lc->get_Ronly();
+
+    foreach my $zone (@removed,@added) {
+      my $return = $heap->{rndc}->do(sprintf("flushname %s",$zone));
+      warn sprintf("flushname %s failed, %s",rev($zone),$heap->{rndc}->error) if (!$return);
+    }
+  }
+
+  # replace the old trie with the new one
+  $heap->{trie} = $heap->{new_trie};
   close $list_fh;
 }#}}}
 
@@ -105,8 +134,10 @@ sub _start {#{{{
   my ($self, $kernel, $heap, $session, %args ) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0..$#_];
 
   $kernel->alias_set($args{alias});
-  print STDERR "Sink Session ($args{alias}) ", $session->ID, " has started.\n";
+  print STDERR "Sink Session ($args{alias}) ", $session->ID, " has started.\n" if (-t);
   $poe_kernel->sig( DIE => 'sig_DIE' );
+
+  $heap->{rndc} = Net::RNDC->new( host => '127.0.0.1', port => 953, key => $args{rndc_key});
 
   # save off what list file we're watching for load_data
   $heap->{list} = $args{list};
@@ -114,16 +145,10 @@ sub _start {#{{{
   # save off resolver object
   $heap->{resolver} = $args{resolver};
 
-  print STDERR "Setting up inotify of $args{list} in $args{inotify} session\n";
-  $kernel->post( $args{inotify} => monitor => {
-	      path => $args{list},
-	      mask  => IN_CLOSE_WRITE,
-	      event => 'list_change',
-	      args => [ "argument_on_notification" ],
-	   } );
-
+  # save off alias to our inotify session
+  $heap->{inotify} = $args{inotify};
   # set up and populate trie
-  $kernel->call($session => "load_data");
+  $kernel->call($session => "load_data","initial");
 
   return undef;
 }#}}}
@@ -202,6 +227,7 @@ sub async_response {#{{{
   @authority    = $answer->authority;
 
   # the response postback gets whitewashed, so it's ok to pass auth/add through.
+  # XXX FIXME XXX we should set AA => 1 only for things we're authorative for
   $response_postback->($rcode, \@answer, \@authority, \@additional, { aa => 1 });
 
 }#}}}

@@ -15,16 +15,15 @@ sub spawn { # {{{
   my $self = bless { }, $class;
 
   $self->{session_id} = POE::Session->create(
-	args => [
+    args => [
           map { defined($args{$_}) ? ($_,$args{$_}) : () } qw(recursive learn sink_aliases resolver port address alias server_alias),
         ],
-	object_states => [
-	  $self => [ qw(_start _stop
-                        query_handler sinkhole_response censor_authority recursive_lookup async_recursive_response refuse_lookup
-                   ) ],
-	  $self => { _child => 'default', _parent => 'default' },
-	],
+    object_states => [
+      $self => [ qw(_start _stop query_handler sinkhole_response censor_authority recursive_lookup async_recursive_response refuse_lookup) ],
+      $self => { _child => 'default', _parent => 'default' },
+    ],
   )->ID();
+  # this is a fake object
   return $self;
 } # }}}
 
@@ -33,6 +32,7 @@ sub default { # {{{
   return undef;
 } # }}}
 
+# This handler receives DNS requests from the PoCo::Server::DNS object.
 sub query_handler { # {{{
   my ($self, $kernel, $heap, $session, $qname,$qclass,$qtype,$callback,$origin) = @_[OBJECT, KERNEL, HEAP, SESSION,ARG0..ARG4];
   my ($rcode, @ans, @auth, @add);
@@ -66,6 +66,7 @@ sub recursive_lookup { # {{{
     return undef;
   }
 
+  print STDERR "Recursive lookup of $qname\n" if (-t);
   my $response = $heap->{resolver}->resolve(
       class => $qclass,
       type => $qtype,
@@ -100,8 +101,8 @@ sub async_recursive_response { # {{{
   my $answer = $response->{response};
   my $error = $response->{error};
 
-  if ($error ne 'NOERROR') { # {{{
-    warn "Recursive error: $error";
+  if ($error ne 'NOERROR' and $error ne 'NXDOMAIN' and $error ne 'SERVFAIL' and $error ne '') { # {{{
+    warn "Recursive error: '$error'";
     $response_postback->("SERVFAIL");
     return undef;
   } # }}}
@@ -113,6 +114,7 @@ sub async_recursive_response { # {{{
   @authority    = $answer->authority;
 
   # the response postback gets whitewashed, so it's ok to pass auth/add through.
+  # XXX FIXME XXX we should set AA => 1 only for things we're authorative for
   $response_postback->($rcode, \@answer, \@authority, \@additional, { aa => 1 });
   return undef;
 } # }}}
@@ -125,6 +127,7 @@ sub censor_authority { # {{{
 
   AUTH_LOOP: foreach my $record (@$auth) { # {{{
 
+    next unless ref ($record); # need this because records get nuked below.
     my @record_fields;
     if ($record->type() eq 'NS')
     { @record_fields = qw(name nsdname); }
@@ -133,7 +136,7 @@ sub censor_authority { # {{{
 
     my ($zone,$nameserver) = map { $record->$_() } @record_fields;
 
-	foreach my $sink_name (@{$heap->{greysink}->{sinks}}) { # {{{
+    foreach my $sink_name (@{$heap->{greysink}->{sinks}}) { # {{{
       my $sinkholed_ns = $kernel->call($sink_name,"lookup",$nameserver);
       my $sinkholed_zone = $kernel->call($sink_name,"lookup",$zone);
 
@@ -141,7 +144,7 @@ sub censor_authority { # {{{
         # nameserver is sinkholed
         if (! $sinkholed_zone) { # {{{
           # nameserver is sinkholed, but zone is NOT sinkholed.  Learn & sinkhole.
-		  printf STDERR "NS %s is sinkholed, but zone %s is not.  Learn and redo\n",$nameserver,$zone;
+		  printf STDERR "NS %s is sinkholed, but zone %s is not.  Learn and redo\n",$nameserver,$zone if (-t);
 		  $kernel->call($sink_name,"learn",$zone);
 		  $kernel->call($sink_name,"learn","*.$zone");
           $redo++;
@@ -168,12 +171,14 @@ sub censor_authority { # {{{
     continue { # {{{
       if ($redo) { # {{{
 		print STDERR "Redo loop hit, breaking out and repeating.\n" if (-t);
-        $kernel->post($session,"query_handler", (map { $ans->[0]->$_() } qw(name class type)), $callback,"0.0.0.0");
+        $kernel->yield("query_handler", (map { $ans->[0]->$_() } qw(name class type)), $callback,"0.0.0.0");
         last AUTH_LOOP;
       } # }}}
     } # }}}
+
     # if we're here, we had no problems.
-    $callback->("NOERROR", $ans, $auth, $add, { aa => 1 }) if (!$redo);
+    # XXX FIXME XXX we should set AA => 1 only for things we're authorative for
+    $callback->($rcode, $ans, $auth, $add, { aa => 1 }) if (!$redo);
 } # }}}
 
 sub sinkhole_response { # {{{
@@ -184,6 +189,7 @@ sub sinkhole_response { # {{{
   # here we need to loop through our sinkholes and ask if they need to censor data.
   # query -> sinkhole(s) -> response data -> check censor(s) -> censored -> handler tells sink to learn -> redo query from top
 
+  # XXX FIXME XXX we should set AA => 1 only for things we're authorative for
   $kernel->yield("censor_authority",$callback,$rcode, $ans, $auth, $add, { aa => 1 });
 } # }}}
 
@@ -194,7 +200,7 @@ sub _stop { # {{{
 sub _start { # {{{
   my ($self, $kernel, $heap, $session, %args) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0.. $#_];
   $kernel->alias_set($args{alias});
-  printf "Greysink Session %d (%s) has started.\n", $session->ID, $args{alias};
+  printf STDERR "Greysink Session %d (%s) has started.\n", $session->ID, $args{alias} if (-t);
 
   # save off our "child" sink aliases
   $heap->{greysink}->{sinks} = $args{sink_aliases};
@@ -202,7 +208,7 @@ sub _start { # {{{
   $heap->{resolver} = $args{resolver};
   my $dns_server = POE::Component::Server::DNS->spawn( # {{{
     alias => $args{server_alias},
-    no_clients => 1, # don't recurse, don't forward.
+    no_clients => 1, # don't recurse, don't forward.  We do this on our own.
     map { defined($args{$_}) ? ($_ , $args{$_}) : () } qw(port address resolver_opts),
   ); # }}}
   $heap->{greysink}->{dns_server} = $dns_server;

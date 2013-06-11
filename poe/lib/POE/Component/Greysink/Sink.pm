@@ -8,6 +8,8 @@ use POEx::Inotify;
 use Linux::Inotify2;
 use Tree::Trie;
 use List::Util qw(first);
+use List::Compare;
+use Net::RNDC;
 
 sub rev ($) { scalar reverse $_[0]; }
 
@@ -18,11 +20,11 @@ sub spawn {#{{{
 
   $self->{session_id} = POE::Session->create(
         args => [
-          map { defined($args{$_}) ? ( $_, $args{$_} ) : () } qw(resolver alias list inotify authority records),
+          map { defined($args{$_}) ? ( $_, $args{$_} ) : () } qw(resolver alias list inotify authority records rndc_key),
          ],
         object_states => [
           $self => [ qw(_start _stop generate_response list_change learn lookup sig_DIE load_data) ],
-	  $self => { _child => 'default' },
+          $self => { _child => 'default' },
         ],
         heap => { alias => $args{alias} },
   )->ID();
@@ -47,22 +49,31 @@ sub learn {#{{{
   my ($self, $kernel, $heap, $session, $dest_zone) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0, ARG1];
   my $records = $heap->{records};
   printf STDERR "Info: Learning new zone %s to sinkhole %s\n",$dest_zone,$heap->{alias} if (-t);
-  $heap->{trie}->add_data( rev($dest_zone), $records );
+  $heap->{trie}->add( rev($dest_zone));
+  my $return = $heap->{rndc}->do(sprintf("flushname %s",$dest_zone));
+  warn sprintf("flushname %s failed, %s",$dest_zone,$heap->{rndc}->error) if (!$return);
   return undef;
 }#}}}
 
 sub list_change {#{{{
   my ($self, $kernel, $heap, $session, $e, $args) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0, ARG1];
   print STDERR "File ready: ", $e->fullname, "\n" if (-t);
-  $kernel->call($session,"load_data");
+  $kernel->call($session,"load_data","update");
 }#}}}
 
 sub load_data {#{{{
-  my ($self, $kernel, $heap, $session, %args ) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0..$#_];
+  my ($self, $kernel, $heap, $session, $mode ) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0];
 
   printf STDERR "Sink %s loading domains from %s\n",$heap->{alias},$heap->{list} if (-t);
+
+  $kernel->post( $heap->{inotify} => monitor => {#{{{
+	      path => $heap->{list},
+	      mask  => IN_CLOSE_WRITE|IN_MOVE|IN_DELETE_SELF,
+	      event => 'list_change',
+	      args => [ "argument_on_notification" ],
+	   } );#}}}
   # set up Trie
-  $heap->{trie} = Tree::Trie->new({deepsearch=> "exact"});
+  $heap->{new_trie} = Tree::Trie->new({deepsearch=> "exact"});
   open(my $list_fh,"<",$heap->{list}) or die "Couldn't open list file $heap->{list}";
 
   if (defined($heap->{records})) {#{{{
@@ -86,18 +97,36 @@ sub load_data {#{{{
       $_ =~ s/[^_.*a-z0-9]//i;
 
       printf STDERR "%s adding %s with data\n",$heap->{alias},$_ if (-t);
-      $heap->{trie}->add_data(rev($_),$heap->{records});
-      $heap->{trie}->add_data(rev("*.$_"),$heap->{records}) unless $_ =~ m/\*/;
+      $heap->{new_trie}->add(rev($_));
+      $heap->{new_trie}->add(rev("*.$_")) unless $_ =~ m/\*/;
     }
   }#}}}
   else {#{{{
-    # we don't have RRs for queries that match our Trie.  Therefore
+    # we don't have RRs for queries that match our Trie.  Therefore just add.
+    # XXX XXX this could be a problem when we try looking up in a sinkhole (this is for whitelist behavior)
     while (<$list_fh>) {
       chomp $_;
       printf STDERR "%s adding %s\n",$heap->{alias},$_;
-      $heap->{trie}->add(rev($_));
+      $heap->{new_trie}->add(rev($_));
     }
   }#}}}
+
+  if ($mode eq "update") {
+    # compare old list to new list and flush those names from the cache
+    my @old = $heap->{trie}->lookup("");
+    my @new = $heap->{new_trie}->lookup("");
+    my $lc = List::Compare->new('-u','-a',\@old,\@new);
+    my @removed = $lc->get_Lonly();
+    my @added = $lc->get_Ronly();
+
+    foreach my $zone (@removed,@added) {
+      my $return = $heap->{rndc}->do(sprintf("flushname %s",rev($zone)));
+      warn sprintf("flushname %s failed, %s",rev($zone),$heap->{rndc}->error) if (!$return);
+    }
+  }
+  # replace the old trie with the new one
+  $heap->{trie} = $heap->{new_trie};
+  #print Data::Dumper->Dump([$heap->{trie}],[qw($trie)]);
   close $list_fh;
 }#}}}
 
@@ -108,16 +137,13 @@ sub _start {#{{{
   print STDERR "Sink Session ($args{alias}) ", $session->ID, " has started.\n" if (-t);
   $poe_kernel->sig( DIE => 'sig_DIE' );
 
+  $heap->{rndc} = Net::RNDC->new( host => '127.0.0.1', port => 953, key => $args{rndc_key});
+
   # save off what list file we're watching for load_data
   $heap->{list} = $args{list};
 
-  print STDERR "Setting up inotify of $args{list} in $args{inotify} session\n" if (-t);
-  $kernel->post( $args{inotify} => monitor => {
-	      path => $args{list},
-	      mask  => IN_CLOSE_WRITE,
-	      event => 'list_change',
-	      args => [ "argument_on_notification" ],
-	   } );
+  # save off the inotify session alias
+  $heap->{inotify} = $args{inotify};
 
   # remember records and authority records, if they exist
   if ($args{authority}) {
@@ -128,7 +154,7 @@ sub _start {#{{{
     $heap->{records} = $args{records};
   }
   # set up and populate trie
-  $kernel->call($session => "load_data");
+  $kernel->call($session => "load_data","initial");
 
 }#}}}
 
@@ -172,7 +198,7 @@ sub generate_response {#{{{
     $oob_state->{handled}++;
 
     # retrieve the fake zone records from the Trie
-    my $record = $heap->{trie}->lookup_data( rev lc($zone) );
+    my $record = $heap->{records};
 
     # check if the RR type asked for exists
     if ( exists ( $record->{$qtype} ) ) {#{{{
@@ -185,6 +211,7 @@ sub generate_response {#{{{
       # make a NS record for the authority section
       my $ns_rr = $heap->{authority}->{NS};
       $ns_rr =~ s/\*/$zone/;
+
       # hide that we might be wildcarding stuff
       $ns_rr =~ s/^\*\.//g;
       push @authority,Net::DNS::RR->new($ns_rr);
@@ -193,25 +220,24 @@ sub generate_response {#{{{
       my $ns_name = $authority[0]->nsdname;
       print STDERR "ns name = $ns_name\n" if (-t);
 
-      # figure out what sinkholed "zone" the NS is in
-      # XXX: this requires that the nameservers of sinkholed domains be in sinkholes!
-      # XXX RGH FIXME: wait, about the above - I'm passing an 'authority' hashref that should overrule this.
-      my $ns_zone = first { $heap->{trie}->lookup( rev lc($_) ) } wildcardsearch($ns_name);
-      # grab the records hashref for that zone
-      my $ns_zone_records = $heap->{trie}->lookup_data( rev lc($ns_zone) );
-      # grab the A record in that hashref
-      my $ns_a = $ns_zone_records->{A};
+      # grab the A record in the authority hashref
+      my $ns_a = $heap->{authority}->{A};
+
       # change the * to be the name of our nameserver
       $ns_a =~ s/\*/$ns_name/;
+
       # add the A record of our sinkholed NS to the additional section
       push @additional,Net::DNS::RR->new($ns_a);
       $rcode = "NOERROR";
 
+      # XXX FIXME XXX we should set AA => 1 only for things we're authorative for
       $response_postback->($rcode, \@answer, \@authority, \@additional, { aa => 1 });
 
     }#}}}
     else {#{{{
+      # XXX XXX we should probally log this case here.
       printf("Sink %s hit for domain %s, but RR type %s %s not found. Return NXDOMAIN.\n",$alias,$qname,$qclass,$qtype) if (-t);
+      # XXX FIXME XXX we should set AA => 1 only for things we're authorative for
       $response_postback->("NXDOMAIN", \@answer, \@authority, \@additional, { aa => 1 });
     }#}}}
   }#}}}
