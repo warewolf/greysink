@@ -10,6 +10,9 @@ use Tree::Trie;
 use List::Util qw(first);
 use List::Compare;
 use Net::RNDC;
+use File::Basename;
+
+my $inotify_pattern = IN_CLOSE_WRITE;
 
 sub rev ($) { scalar reverse $_[0]; }
 
@@ -31,6 +34,7 @@ sub spawn {#{{{
   return $self;
 }#}}}
 
+# default catch-all handler for ignoring events
 sub default {#{{{
   my ($self, $kernel, $heap, $session, $source, $dest) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0, ARG1];
   return undef;
@@ -44,10 +48,10 @@ sub lookup {#{{{
   return undef;
 }#}}}
 
-# clone an existing Trie record to another one
+# add a new zone to the trie
 sub learn {#{{{
   my ($self, $kernel, $heap, $session, $dest_zone, $source_zone) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0, ARG1];
-  printf STDERR "Info: Learning new zone %s to sinkhole %s mimicing %s\n",$dest_zone,$source_zone,$heap->{alias} if (-t);
+  # printf STDERR "Info: Learning new zone %s to sinkhole %s\n",$dest_zone,$heap->{alias};
   $heap->{trie}->add( rev($dest_zone));
   my $return = $heap->{rndc}->do(sprintf("flushname %s",$dest_zone));
   warn sprintf("flushname %s failed, %s",$dest_zone,$heap->{rndc}->error) if (!$return);
@@ -56,60 +60,50 @@ sub learn {#{{{
 
 sub list_change {#{{{
   my ($self, $kernel, $heap, $session, $e, $args) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0, ARG1];
-  print STDERR "File ready: ", $e->fullname, "\n";
+  return unless $e->fullname =~ qr/\/$args->{filename}$/;
   $kernel->call($session,"load_data","update");
 }#}}}
 
 sub load_data {#{{{
   my ($self, $kernel, $heap, $session, $mode ) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0];
 
-  printf STDERR "Sink %s loading domains from %s\n",$heap->{alias},$heap->{list} if (-t);
+  #printf STDERR "Sink %s loading domains from %s\n",$heap->{alias},$heap->{list};
+  my ($filename,$path,$extension) = fileparse($heap->{list});
 
-  $kernel->post( $heap->{inotify} => monitor => {#{{{
-             path => $heap->{list},
-             mask  => IN_CLOSE_WRITE|IN_MOVE|IN_DELETE_SELF,
+  $kernel->call( $heap->{inotify} => unmonitor => {#{{{
+             path => $path,
+             mask  => $inotify_pattern,
              event => 'list_change',
-             args => [ "argument_on_notification" ],
+             args => { filename => $filename },
           } );#}}}
 
   # set up Trie
   $heap->{new_trie} = Tree::Trie->new({deepsearch=> "exact"});
   open(my $list_fh,"<",$heap->{list}) or die "Couldn't open list file $heap->{list}";
 
-  if (defined($heap->{records})) {#{{{
-    # we have RRs for queries that match our Trie
-    while (<$list_fh>) {
-      chomp $_;
+  # we have RRs for queries that match our Trie
+  while (<$list_fh>) {
+    chomp $_;
 
-      # skip comments
-      next if ($_ =~ m/^#/);
+    # skip comments
+    next if ($_ =~ m/^#/);
 
-      # remove comments from end of line
-      $_ =~ s/\s*#.*//;
+    # remove comments from end of line
+    $_ =~ s/\s*#.*//;
 
-      # remove whitespace
-      $_ =~ s/^\s+//; $_ =~ s/\s+$//;
+    # remove whitespace
+    $_ =~ s/^\s+//; $_ =~ s/\s+$//;
 
-      # skip lines that are empty
-      next unless length($_);
+    # skip lines that are empty
+    next unless length($_);
 
-      # remove invalid characters
-      $_ =~ s/[^_.*a-z0-9]//i;
+    # remove invalid characters
+    $_ =~ s/[^_.*a-z0-9]//i;
 
-      printf STDERR "%s adding %s with data\n",$heap->{alias},$_ if (-t);
-      $heap->{new_trie}->add(rev($_));
-      $heap->{new_trie}->add(rev("*.$_")) unless $_ =~ m/\*/;
-    }
-  }#}}}
-  else {#{{{
-    # we don't have RRs for queries that match our Trie.  Therefore just add.
-    while (<$list_fh>) {#{{{
-      chomp $_;
-      printf STDERR "%s adding %s\n",$heap->{alias},$_ if (-t);
-      $heap->{new_trie}->add(rev($_));
-      $heap->{new_trie}->add(rev("*.$_")) unless $_ =~ m/\*/;
-    }#}}}
-  }#}}}
+    #printf STDERR "%s adding %s\n",$heap->{alias},$_;
+    $heap->{new_trie}->add(rev($_));
+    $heap->{new_trie}->add(rev("*.$_")) unless $_ =~ m/\*/;
+  }
 
   if ($mode eq "update") {
     # compare old list to new list and flush those names from the cache
@@ -121,6 +115,7 @@ sub load_data {#{{{
 
     foreach my $zone (@removed,@added) {
       my $return = $heap->{rndc}->do(sprintf("flushname %s",$zone));
+      #printf STDERR "Flushing %s\n",rev($zone) if (-t) ;
       warn sprintf("flushname %s failed, %s",rev($zone),$heap->{rndc}->error) if (!$return);
     }
   }
@@ -128,13 +123,19 @@ sub load_data {#{{{
   # replace the old trie with the new one
   $heap->{trie} = $heap->{new_trie};
   close $list_fh;
+  $kernel->call( $heap->{inotify} => monitor => {#{{{
+             path => $path,
+             mask  => $inotify_pattern,
+             event => 'list_change',
+             args => { filename => $filename },
+          } );#}}}
 }#}}}
 
 sub _start {#{{{
   my ($self, $kernel, $heap, $session, %args ) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0..$#_];
 
   $kernel->alias_set($args{alias});
-  print STDERR "Sink Session ($args{alias}) ", $session->ID, " has started.\n" if (-t);
+  #print STDERR "Sink Session ($args{alias}) ", $session->ID, " has started.\n";
   $poe_kernel->sig( DIE => 'sig_DIE' );
 
   $heap->{rndc} = Net::RNDC->new( host => '127.0.0.1', port => 953, key => $args{rndc_key});
@@ -167,7 +168,7 @@ sub sig_DIE {#{{{
 }#}}}
 
 sub _stop {#{{{
-  print STDERR "Session ", $_[SESSION]->ID, " has stopped.\n";
+  #print STDERR "Session ", $_[SESSION]->ID, " has stopped.\n";
 }#}}}
 
 sub generate_response {#{{{
@@ -177,11 +178,11 @@ sub generate_response {#{{{
   # answer data
   my ( $rcode, @answer, @authority, @additional, $headermask );
 
-  printf STDERR "Lookup of %s in %s\n", $qname,$alias if (-t);
+  #printf STDERR "Lookup of %s in %s\n", $qname,$alias;
 
   # XXX FIXME: Whitelist should always come first, does this really need to check OOB state? XXX FIXME
   if ($oob_state->{handled}) {#{{{
-    printf STDERR "This request was handled by a previous sinkhole handler\n" if (-t);
+    #printf STDERR "This request was handled by a previous sinkhole handler\n";
     return undef;
   }#}}}
 
@@ -189,7 +190,7 @@ sub generate_response {#{{{
   my $zone = first { $heap->{trie}->lookup( rev lc($_) ) } wildcardsearch($qname);
 
   if ($zone) {# we found a record in our trie#{{{
-    printf STDERR "HIT: %s matches %s is in sink %s\n", $qname, $zone,$heap->{alias} if (-t);
+    #printf STDERR "HIT: %s matches %s is in sink %s\n", $qname, $zone,$heap->{alias};
     $oob_state->{handled}++;
 
     # POE::Component::Client::DNS can return results immediately (from cache) a hahsref
@@ -208,7 +209,7 @@ sub generate_response {#{{{
     }#}}}
   }#}}}
   else {#{{{
-    printf STDERR ("Zone %s not found in sink %s, do nothing.\n",$qname,$alias) if (-t);
+    #printf STDERR ("Zone %s not found in sink %s, do nothing.\n",$qname,$alias);
   }#}}}
 }#}}}
 
@@ -218,9 +219,17 @@ sub async_response {#{{{
 
   my $response_postback = $response->{context};
   my $answer = $response->{response};
-  my $error = $response->{error}; # XXX FIXME RGH: CHECK FOR ERRORS!!! XXX FIXME
+  my $error = $response->{error};
 
-  # clone the response$
+  # XXX FIXME check for errors!!! XXX FIXME
+  if ( !defined($answer) && $error ne 'NXDOMAIN' && $error ne 'SERVFAIL' && $error ne '') { # {{{
+    warn "Recursive error: '$error'";
+    $response_postback->("SERVFAIL");
+    return undef;
+  } # }}}
+
+
+  # clone the response
   $rcode        = $answer->header->rcode;
   @answer       = $answer->answer;
   @additional   = $answer->additional;

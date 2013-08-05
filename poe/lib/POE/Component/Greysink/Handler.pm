@@ -4,7 +4,7 @@ use POE qw(Component::Server::DNS Component::Greysink::Sink Component::Greysink:
 use strict;
 use warnings;
 
-# Spawn a new PoCo::Greysink session.  This basically is a
+# Spawn a new PoCo::Greysink::Handler session.  This basically is a
 # constructor, but it isn't named "new" because it doesn't create a
 # usable object.  Instead, it spawns the object off as a session.
 
@@ -16,6 +16,7 @@ sub spawn { # {{{
 
   $self->{session_id} = POE::Session->create(
     args => [
+          # this map command here filters out any invalid args passed to spawn, that would otherwise get passed to _start
           map { defined($args{$_}) ? ($_,$args{$_}) : () } qw(recursive learn sink_aliases resolver port address alias server_alias),
         ],
     object_states => [
@@ -23,10 +24,11 @@ sub spawn { # {{{
       $self => { _child => 'default', _parent => 'default' },
     ],
   )->ID();
-  # this is a fake object
+
   return $self;
 } # }}}
 
+# default catch-all method for ignoring events
 sub default { # {{{
   my ($self, $kernel, $heap, $session, $source, $dest) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0, ARG1];
   return undef;
@@ -37,9 +39,10 @@ sub query_handler { # {{{
   my ($self, $kernel, $heap, $session, $qname,$qclass,$qtype,$callback,$origin) = @_[OBJECT, KERNEL, HEAP, SESSION,ARG0..ARG4];
   my ($rcode, @ans, @auth, @add);
 
-  # hashref accessible to all sinkhole "lookup" events - for cross-communication
-  # that they can "fall through" early when a sinkhole has "answered" a request 
-  my $oob_state = { handled => 0 };
+  # hashref accessible to all sinkhole "lookup" events - for cross-communication (out of band state)
+  # that they can "fall through" early when a previous sinkhole has "answered" a request
+  my $oob_state = { handled => 0 }; # 0 = false, 1 = true
+
   my $postback = $session->postback("sinkhole_response",$callback);
 
   # send queries to sinkholes
@@ -58,15 +61,16 @@ sub query_handler { # {{{
   return undef;
 } # }}}
 
+# perform a recursive lookup, and direct the response to async_recursive_response
 sub recursive_lookup { # {{{
   my ($self, $kernel, $heap, $session, $response_postback,$qname,$qclass,$qtype,$oob_state) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0..ARG5];
 
   if ($oob_state->{handled}) {
-    printf STDERR "This request was handled by a previous sinkhole handler\n" if (-t);
+    #printf STDERR "This request was handled by a previous sinkhole handler\n";
     return undef;
   }
 
-  print STDERR "Recursive lookup of $qname\n" if (-t);
+  #print STDERR "Recursive lookup of $qname\n";
   my $response = $heap->{resolver}->resolve(
       class => $qclass,
       type => $qtype,
@@ -77,7 +81,7 @@ sub recursive_lookup { # {{{
 
     # If data is returned from cache, act as if it wasn't, and just post it to our receiver.
     if ($response) {
-      $kernel->yield("async_recursive_response",$response);
+      $kernel->yield("async_recursive_response",$response); # XXX should this be call?
     }
   return undef;
 } # }}}
@@ -85,7 +89,7 @@ sub recursive_lookup { # {{{
 sub refuse_lookup { # {{{
   my ($self, $kernel, $heap, $session, $response_postback,$qname,$qclass,$qtype,$oob_state) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0..ARG5];
 
-  print STDERR "Refusing recursive lookup\n" if (-t);
+  #print STDERR "Refusing recursive lookup\n";
   $oob_state->{handled}++;
 
   my ( $rcode, @answer, @authority, @additional, $headermask );
@@ -101,13 +105,14 @@ sub async_recursive_response { # {{{
   my $answer = $response->{response};
   my $error = $response->{error};
 
-  if ($error ne 'NOERROR' and $error ne 'NXDOMAIN' and $error ne 'SERVFAIL' and $error ne '') { # {{{
+  # XXX FIXME check for errors!!! XXX FIXME
+  if ( !defined($answer) && $error ne 'NXDOMAIN' && $error ne 'SERVFAIL' && $error ne '') { # {{{
     warn "Recursive error: '$error'";
     $response_postback->("SERVFAIL");
     return undef;
   } # }}}
 
-  # clone the response$
+  # clone the response
   $rcode        = $answer->header->rcode;
   @answer       = $answer->answer;
   @additional   = $answer->additional;
@@ -119,15 +124,20 @@ sub async_recursive_response { # {{{
   return undef;
 } # }}}
 
+# iterate through authority/additional fields and remove them if they're blacklisted somewhere.
+# this prevents us "leaking" unwanted (real, bad) data to our clients, which could lead to them
+# bypassing our sinkhole implementation.
 sub censor_authority { # {{{
-  my ($self, $kernel, $heap, $session, $callback, $rcode, $ans, $auth, $add,$headermask) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0..ARG5];
+  my ($self, $kernel, $heap, $session, $response_callback, $rcode, $ans, $auth, $add, $headermask) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0..ARG5];
 
-  # flag variable to see if we need to redo the query
+  # flag variable to see if we need to redo the censor_authority() because we blacklisted & learned something new
+  # XXX FIXME: this learning code is never off (configured through learn $ARGS)
   my $redo = 0;
 
   AUTH_LOOP: foreach my $record (@$auth) { # {{{
 
-    next unless ref ($record); # need this because records get nuked below.
+    next unless ref ($record); # XXX need the ref check here because records get set to undef below.
+    # XXX FIXME this can be less complex if I use splice to empty the contents of $auth.
     my @record_fields;
     if ($record->type() eq 'NS')
     { @record_fields = qw(name nsdname); }
@@ -136,6 +146,7 @@ sub censor_authority { # {{{
 
     my ($zone,$nameserver) = map { $record->$_() } @record_fields;
 
+    # ask each sink if they know about the authorative nameserver and zone
     foreach my $sink_name (@{$heap->{greysink}->{sinks}}) { # {{{
       my $sinkholed_ns = $kernel->call($sink_name,"lookup",$nameserver);
       my $sinkholed_zone = $kernel->call($sink_name,"lookup",$zone);
@@ -144,10 +155,16 @@ sub censor_authority { # {{{
         # nameserver is sinkholed
         if (! $sinkholed_zone) { # {{{
           # nameserver is sinkholed, but zone is NOT sinkholed.  Learn & sinkhole.
-		  printf STDERR "NS %s is sinkholed, but zone %s is not.  Learn and redo\n",$nameserver,$zone if (-t);
-		  $kernel->call($sink_name,"learn",$zone);
-		  $kernel->call($sink_name,"learn","*.$zone");
-          $redo++;
+          # XXX FIXME learning mode
+		  #printf STDERR "NS %s is sinkholed, but zone %s is not.  Learn and redo\n",$nameserver,$zone;
+		  if ($heap->{learn}) { # {{{
+			$kernel->call($sink_name,"learn",$zone);
+			$kernel->call($sink_name,"learn","*.$zone");
+			$redo++;
+		  } # }}}
+		  else { # {{{
+			warn sprintf("NS %s is sinkholed, but zone %s is not.  Learning is disabled, so this will not be blocked.",$nameserver,$zone);
+		  } # }}}
         } # }}}
 		else { # {{{
 		  # nameserver is sinkholed, so is zone.  All good, do nothing
@@ -156,61 +173,65 @@ sub censor_authority { # {{{
 	  else { # {{{
         # nameserver is NOT sinkholed
         if ( $sinkholed_zone) { # {{{
-          # nameserver is NOT sinkholed, but zone IS sinkholed
+          # nameserver is NOT sinkholed, but zone IS sinkholed.
+          # If the auth/add records got leaked back to the client,
+          # the client could talk directly to the REAL authorative NS instead of us.
+
 		  # kill the AUTHORITY records
 		  map { $_ = undef } @$auth;
 		  # kill the ADDITIONAL records
 		  map { $_ = undef } @$add;
         } # }}}
         else { # {{{
-		  # nameserver is NOT sinkholed, zone is NOT sinkholed.
+		  # nameserver is NOT sinkholed, zone is NOT sinkholed.  All good, do nothing
         } # }}}
       } # }}}
-    }#  # }}}
-  } # }}}
-    continue { # {{{
-      if ($redo) { # {{{
-		print STDERR "Redo loop hit, breaking out and repeating.\n" if (-t);
-        $kernel->yield("query_handler", (map { $ans->[0]->$_() } qw(name class type)), $callback,"0.0.0.0");
-        last AUTH_LOOP;
-      } # }}}
     } # }}}
+  } # }}}
+    continue {
+      if ($redo) {
+		#print STDERR "Redo loop hit, breaking out and repeating.\n";
+        $kernel->yield("query_handler", (map { $ans->[0]->$_() } qw(name class type)), $response_callback,"0.0.0.0");
+        last AUTH_LOOP;
+      }
+    }
 
     # if we're here, we had no problems.
     # XXX FIXME XXX we should set AA => 1 only for things we're authorative for
-    $callback->($rcode, $ans, $auth, $add, { aa => 1 }) if (!$redo);
+    $response_callback->($rcode, $ans, $auth, $add, { aa => 1 }) if (!$redo);
 } # }}}
 
 sub sinkhole_response { # {{{
   my ($self, $kernel, $heap, $session, $creation_args, $called_args) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0, ARG1];
-  my ($callback) = @$creation_args;
+  my ($response_callback) = @$creation_args;
   my ($rcode,$ans,$auth,$add,$header) = @$called_args;
 
   # here we need to loop through our sinkholes and ask if they need to censor data.
   # query -> sinkhole(s) -> response data -> check censor(s) -> censored -> handler tells sink to learn -> redo query from top
 
   # XXX FIXME XXX we should set AA => 1 only for things we're authorative for
-  $kernel->yield("censor_authority",$callback,$rcode, $ans, $auth, $add, { aa => 1 });
+  $kernel->yield("censor_authority",$response_callback,$rcode, $ans, $auth, $add, { aa => 1 });
 } # }}}
 
 sub _stop { # {{{
-  print "Session ", $_[SESSION]->ID, " has stopped.\n";
-} # }}}
+  #print "Session ", $_[SESSION]->ID, " has stopped.\n";
+}
 
-sub _start { # {{{
+sub _start {
   my ($self, $kernel, $heap, $session, %args) = @_[OBJECT, KERNEL, HEAP, SESSION, ARG0.. $#_];
   $kernel->alias_set($args{alias});
-  printf STDERR "Greysink Session %d (%s) has started.\n", $session->ID, $args{alias} if (-t);
+  #printf STDERR "Greysink Session %d (%s) has started.\n", $session->ID, $args{alias};
 
   # save off our "child" sink aliases
   $heap->{greysink}->{sinks} = $args{sink_aliases};
 
   $heap->{resolver} = $args{resolver};
-  my $dns_server = POE::Component::Server::DNS->spawn( # {{{
+  $heap->{learn} = $args{learn};
+  my $dns_server = POE::Component::Server::DNS->spawn(
     alias => $args{server_alias},
     no_clients => 1, # don't recurse, don't forward.  We do this on our own.
     map { defined($args{$_}) ? ($_ , $args{$_}) : () } qw(port address resolver_opts),
-  ); # }}}
+  );
   $heap->{greysink}->{dns_server} = $dns_server;
   $heap->{recursive} = $args{recursive};
 
@@ -221,6 +242,6 @@ sub _start { # {{{
       label => 'ZA_WARUDO',
       match => '.',
   });
-} # }}}
+}
 
 1;
